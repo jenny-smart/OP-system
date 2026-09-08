@@ -28,6 +28,13 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 CITY_ORDER = ["台北", "台中", "桃園", "新竹", "高雄"]
 INCOME_ORDER = ["現金收入", "儲值金"]
 CATEGORY_ORDER = ["清潔", "儲值金", "冷氣", "洗衣機", "水洗", "收納"]
+ORDER_DATE_SUMMARY_EXCLUDED_CATEGORIES = {
+    "儲值金",
+    "冷氣",
+    "洗衣機",
+    "水洗",
+    "收納",
+}
 
 REGION3_CATEGORY_ORDER = [
     "清潔",
@@ -254,7 +261,8 @@ def build_order_date_summary(raw_df: pd.DataFrame, month_rows=None) -> pd.DataFr
     「訂購日期＋服務日期」兩個條件一起查一次財務彙總表算出來的（見
     generate_order_date_report()／_order_date_month_ranges()），不是自己逐筆訂單
     加總——這樣金額口徑才會跟地區/加總欄位完全一致，不會有稅前/稅後金額混淆、
-    分頁漏單、儲值金訂單總金額顯示 0 之類的問題。月份欄位只影響「待付款/已付款」
+    分頁漏單、儲值金訂單總金額顯示 0 之類的問題。上方三張表只統計清潔類服務，
+    家電（冷氣、洗衣機）、水洗與收納都不列入。月份欄位只影響「待付款/已付款」
     底下的拆分，不影響地區/加總/儲值金這幾個主要欄位的數字（那些永遠以 raw_df
     為準）；month_rows 缺漏時就不會有月份欄位，不會出錯。
     """
@@ -266,9 +274,11 @@ def build_order_date_summary(raw_df: pd.DataFrame, month_rows=None) -> pd.DataFr
     work = raw_df.copy()
     work["類別"] = work.apply(lambda r: to_category(r["服務"], r["收入類型"]), axis=1)
 
-    # 儲值金以外的所有項目（清潔、家電、水洗、收納…）都算進「待付款/已付款」，
-    # 未分類的服務名稱也保留，避免因為新服務名稱沒被 to_category() 認得而遺漏金額。
-    service_df = work[work["類別"] != "儲值金"].copy()
+    # 上方待付款、已付款與兩者合計只統計清潔類；家電、水洗、收納另有明細表，
+    # 不在這裡重複計算。未分類的新服務名稱仍保留，避免新服務無預警漏帳。
+    service_df = work[
+        ~work["類別"].isin(ORDER_DATE_SUMMARY_EXCLUDED_CATEGORIES)
+    ].copy()
     stored_value_df = work[(work["收入類型"] == "現金收入") & (work["類別"] == "儲值金")]
 
     month_df = pd.DataFrame(month_rows) if month_rows else pd.DataFrame()
@@ -428,8 +438,8 @@ def generate_order_date_report(order_start_date: str, order_end_date: str, trigg
     本月這個月份用服務日期「不限起日、只限本月底」查（逾期未結的訂單服務日期
     可能落在本月以前，這樣才不會漏掉），之後 4 個月才各自用整月起訖日查、彼此
     不重疊。儲值金儲值單本身沒有服務日期，若落進「不限起日」這種查詢會被算進
-    去，但每一輪都還是用 to_category() 排除「儲值金」類別，所以不會滲進月份
-    欄位裡（跟地區/加總欄位排除儲值金的邏輯完全一致）。
+    去，但每一輪都還是用 to_category() 排除儲值金、家電、水洗與收納，所以不會
+    滲進月份欄位裡（跟地區/加總欄位使用完全相同的排除規則）。
     """
     if order_end_date < order_start_date:
         raise ValueError("訂購日期迄日不可早於起日")
@@ -474,7 +484,7 @@ def generate_order_date_report(order_start_date: str, order_end_date: str, trigg
                     month_response.raise_for_status()
                     for row in parse_html(month_response.text):
                         category = to_category(row["服務"], row["收入類型"])
-                        if category == "儲值金":
+                        if category in ORDER_DATE_SUMMARY_EXCLUDED_CATEGORIES:
                             continue
                         month_key = (city, label)
                         if month_key not in month_totals:

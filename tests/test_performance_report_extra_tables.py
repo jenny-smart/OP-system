@@ -38,6 +38,25 @@ def test_order_date_summary_groups_by_city_and_totals():
     ]
 
 
+def test_order_date_summary_excludes_appliances_water_wash_and_storage():
+    raw_df = pd.DataFrame([
+        # 桃園清潔現金與清潔儲值金都應保留。
+        {"城市": "桃園", "收入類型": "現金收入", "服務": "居家清潔", "已付款": 4800, "待付款": 5700},
+        {"城市": "桃園", "收入類型": "儲值金", "服務": "居家清潔", "已付款": 7200, "待付款": 0},
+        # 家電、水洗與收納不得出現在上方三張付款彙總表。
+        {"城市": "桃園", "收入類型": "現金收入", "服務": "洗衣機清潔", "已付款": 4000, "待付款": 7500},
+        {"城市": "桃園", "收入類型": "現金收入", "服務": "水洗", "已付款": 3000, "待付款": 2000},
+        {"城市": "桃園", "收入類型": "現金收入", "服務": "收納", "已付款": 1000, "待付款": 900},
+    ])
+
+    out = report.build_order_date_summary(raw_df)
+    taoyuan = out[out["地區"] == "桃園"].iloc[0]
+
+    assert taoyuan["待付款"] == 5700
+    assert taoyuan["已付款"] == 12000
+    assert taoyuan["待付款＋已付款"] == 17700
+
+
 def test_order_date_summary_splits_service_date_into_dynamic_month_columns():
     # 財務彙總表（raw_df）只給總額；服務日期來自逐筆訂單資料（order_rows，見
     # generate_order_date_report() 如何用 _fetch_purchase_items() 組出這份清單），

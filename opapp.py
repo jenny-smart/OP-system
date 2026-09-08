@@ -986,8 +986,7 @@ def _show_summary_csv(filename: str, empty_message: str):
 
 
 def _show_order_date_summary_tables(filename: str, empty_message: str):
-    """待付款、已付款分成兩張獨立的表格顯示（含各自的月份/儲值金欄位），
-    「待付款＋已付款」這種合計欄位不拆表、不顯示，只留在 CSV 裡供匯出。"""
+    """顯示待付款、已付款及待付款＋已付款三張付款彙總表。"""
     df = _read_csv_safe(os.path.join(LATEST_DIR, filename))
     if df.empty:
         st.info(empty_message)
@@ -1040,7 +1039,7 @@ def render_order_date_report_tab():
         st.error("訂購日期迄日不可早於起日")
     if st.button("✅ 確定並套用訂購日期區間", key="apply_order_date_range", use_container_width=True):
         _run_filtered_performance_report("order")
-    st.caption("預設起迄日皆為當日，依訂購日期查詢，結果依地區統計，待付款、已付款分成兩張表；每張底下再依服務日期拆出固定的月份欄位（本月＋4個月），金額都是後端財務彙總表直接算好的含稅總金額（已扣車馬費），跟地區/加總欄位同一套邏輯、口徑一致。儲值金（跟「目前總表」用同一套判斷邏輯，非用儲值金付款的清潔訂單）獨立成每張表各自的「儲值金待付款/儲值金已付款」欄位，不拆月份。")
+    st.caption("預設起迄日皆為當日，依訂購日期查詢，結果依地區統計。上方待付款、已付款及待付款＋已付款三張表只統計清潔類服務，排除家電、水洗與收納；每張底下再依服務日期拆出固定的月份欄位（本月＋4個月），金額都是後端財務彙總表直接算好的含稅總金額（已扣車馬費），跟地區/加總欄位同一套邏輯、口徑一致。儲值金（跟「目前總表」用同一套判斷邏輯，非用儲值金付款的清潔訂單）獨立成每張表各自的「儲值金待付款/儲值金已付款」欄位，不拆月份。")
     _show_order_date_summary_tables("order_date_summary.csv", "尚未產生付款彙總，請選擇日期後按確定。")
     _order_date_report_ui.show_service_tables(
         LATEST_DIR, _read_csv_safe, _format_report_df, _report_column_config
