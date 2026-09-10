@@ -1732,7 +1732,10 @@ def generate_sales_report(
     df2 = build_region2_df(raw_df)
     df3 = build_region3_df(df2)
     df4 = build_region4_df(df2)
-    order_date_df = build_order_date_summary(order_date_records) if include_extra_reports else None
+    order_date_df = build_order_date_summary(
+        report_raw_df,
+        order_date_records,
+    ) if include_extra_reports else None
     month_performance_df = build_month_performance_summary(report_raw_df, report_month_ranges) if include_extra_reports else None
     reserve_df = build_reserve_summary(reserve_records, report_month_ranges) if include_extra_reports else None
     net_performance_df = build_net_performance_summary(report_raw_df, reserve_df, report_month_ranges) if include_extra_reports else None
