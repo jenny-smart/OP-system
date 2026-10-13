@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-10-13 06:59:41",
+  "updated_at": "2026-10-13 14:42:05",
   "df4_rows": 6,
-  "daily_rows": 426,
-  "next_month_daily_rows": 416,
+  "daily_rows": 427,
+  "next_month_daily_rows": 417,
   "month_end_rows": 0,
   "error": null,
   "trigger": "schedule",
@@ -14,6 +14,6 @@
   "report_end_month": "2026/10",
   "order_start_date": "2026-10-13",
   "order_end_date": "2026-10-13",
-  "order_date_updated_at": "2026-10-13 06:59:41",
+  "order_date_updated_at": "2026-10-13 14:42:05",
   "order_date_error": null
 }
