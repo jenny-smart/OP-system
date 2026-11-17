@@ -34,7 +34,7 @@ def show_service_tables(latest_dir, read_csv, format_df, column_config):
     if df.empty:
         st.info("尚未產生家電／水洗付款彙總，請重新套用訂購日期區間。")
         return
-    st.markdown('<div class="section-title">家電／水洗付款（僅顯示本月與次月）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">家電／水洗付款（本月起 5 個月）</div>', unsafe_allow_html=True)
     for service in ("家電", "水洗"):
         left, right = st.columns(2)
         for container, status in ((left, "待付款"), (right, "已付款")):
