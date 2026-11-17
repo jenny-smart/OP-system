@@ -36,6 +36,16 @@ ORDER_DATE_SUMMARY_EXCLUDED_CATEGORIES = {
     "收納",
 }
 
+# 業績報表（各區月度摘要）的月份：本月起連續 5 個月，跟「訂購日期付款彙總」的 5 個月份一致。
+# REPORT_MONTH_KEYS 是 raw_df「月份」欄的內部標籤（次月沿用舊標籤「下月」，不動 df1 與既有 CSV），
+# REPORT_MONTH_NAMES 是畫面／CSV 欄位名稱的前綴。
+REPORT_MONTH_KEYS = ["本月", "下月", "次次月", "次次次月", "次次次次月"]
+REPORT_MONTH_NAMES = ["本月", "次月", "次次月", "次次次月", "次次次次月"]
+REGION4_AMOUNT_COLS = [f"{n}加總" for n in REPORT_MONTH_NAMES]
+REGION4_RATIO_COLS = [f"{n}佔比" for n in REPORT_MONTH_NAMES]
+REGION4_APPLIANCE_COLS = [f"{n}家電加總" for n in REPORT_MONTH_NAMES]
+REGION4_INT_COLS = REGION4_AMOUNT_COLS + REGION4_APPLIANCE_COLS + ["儲值金"]
+
 REGION3_CATEGORY_ORDER = [
     "清潔",
     "冷氣",
@@ -853,20 +863,13 @@ def build_region2_df(raw_df: pd.DataFrame) -> pd.DataFrame:
                     (work["類別"] == category)
                 ]
 
-                bm = sub[sub["月份"] == "本月"]
-                nm = sub[sub["月份"] == "下月"]
-
-                rows.append({
-                    "城市": city,
-                    "收入類型": income,
-                    "類別": category,
-                    "本月待付": bm["待付款"].sum(),
-                    "本月已付": bm["已付款"].sum(),
-                    "本月加總": bm["已付款"].sum() + bm["待付款"].sum(),
-                    "次月待付": nm["待付款"].sum(),
-                    "次月已付": nm["已付款"].sum(),
-                    "次月加總": nm["已付款"].sum() + nm["待付款"].sum(),
-                })
+                row = {"城市": city, "收入類型": income, "類別": category}
+                for key, name in zip(REPORT_MONTH_KEYS, REPORT_MONTH_NAMES):
+                    m = sub[sub["月份"] == key]
+                    row[f"{name}待付"] = m["待付款"].sum()
+                    row[f"{name}已付"] = m["已付款"].sum()
+                    row[f"{name}加總"] = m["已付款"].sum() + m["待付款"].sum()
+                rows.append(row)
 
     return pd.DataFrame(rows)
 
@@ -936,8 +939,6 @@ def build_region4_df(region2_df: pd.DataFrame) -> pd.DataFrame:
         city_df = region2_df[region2_df["城市"] == city].copy()
 
         appliance_df = city_df[city_df["類別"].isin(["冷氣", "洗衣機"])]
-        bm_appliance = appliance_df["本月加總"].sum()
-        nm_appliance = appliance_df["次月加總"].sum()
 
         cash_stored_df = city_df[
             (city_df["收入類型"] == "現金收入") &
@@ -946,54 +947,43 @@ def build_region4_df(region2_df: pd.DataFrame) -> pd.DataFrame:
         bm_cash_stored = cash_stored_df["本月加總"].sum()
         nm_cash_stored = cash_stored_df["次月加總"].sum()
 
-        # 本月/次月加總：清潔服務業績。
+        # 各月份加總（本月～次次次次月）：清潔服務業績。
         # 規則：
         # 1) 不論收入類型是「現金收入」或「儲值金」，都必須先依服務分類。
-        # 2) 只有「清潔」類別納入本月/次月加總。
-        # 3) 儲值金中的冷氣、洗衣機屬於家電，只放在「家電加總」，不放進本月/次月加總。
-        # 4) 儲值金中的水洗屬於水洗，不放進本月/次月加總。
-        # 5) 現金收入的「儲值金購買」是預收款，不屬於服務業績，不放進本月/次月加總。
+        # 2) 只有「清潔」類別納入各月份加總。
+        # 3) 儲值金中的冷氣、洗衣機屬於家電，只放在各月份「家電加總」，不放進各月份加總。
+        # 4) 儲值金中的水洗屬於水洗，不放進各月份加總。
+        # 5) 現金收入的「儲值金購買」是預收款，不屬於服務業績，不放進各月份加總。
         total_df = city_df[city_df["類別"] == "清潔"]
 
-        rows.append({
-            "城市": city,
-            "本月加總": total_df["本月加總"].sum(),
-            "次月加總": total_df["次月加總"].sum(),
-            "本月家電加總": bm_appliance,
-            "次月家電加總": nm_appliance,
-            "儲值金": bm_cash_stored + nm_cash_stored,
-        })
+        row = {"城市": city}
+        for name in REPORT_MONTH_NAMES:
+            col = f"{name}加總"
+            row[col] = total_df[col].sum()
+            row[f"{name}家電加總"] = appliance_df[col].sum()
+        # 儲值金維持原本口徑（本月＋次月的現金收入儲值金購買）。
+        row["儲值金"] = bm_cash_stored + nm_cash_stored
+        rows.append(row)
 
     region4 = pd.DataFrame(rows)
-    bm_sum = region4["本月加總"].sum()
-    nm_sum = region4["次月加總"].sum()
 
-    region4["本月佔比"] = 0 if bm_sum == 0 else region4["本月加總"] / bm_sum
-    region4["次月佔比"] = 0 if nm_sum == 0 else region4["次月加總"] / nm_sum
+    total_row = {"城市": "加總"}
+    for name in REPORT_MONTH_NAMES:
+        amount_col = f"{name}加總"
+        month_sum = region4[amount_col].sum()
+        region4[f"{name}佔比"] = 0 if month_sum == 0 else region4[amount_col] / month_sum
+        total_row[amount_col] = month_sum
+        total_row[f"{name}佔比"] = 1
+        total_row[f"{name}家電加總"] = region4[f"{name}家電加總"].sum()
+    total_row["儲值金"] = region4["儲值金"].sum()
 
-    total_row = pd.DataFrame([{
-        "城市": "加總",
-        "本月加總": bm_sum,
-        "本月佔比": 1,
-        "次月加總": nm_sum,
-        "次月佔比": 1,
-        "本月家電加總": region4["本月家電加總"].sum(),
-        "次月家電加總": region4["次月家電加總"].sum(),
-        "儲值金": region4["儲值金"].sum(),
-    }])
+    region4 = pd.concat([region4, pd.DataFrame([total_row])], ignore_index=True)
 
-    region4 = pd.concat([region4, total_row], ignore_index=True)
-
-    return region4[[
-        "城市",
-        "本月加總",
-        "本月佔比",
-        "次月加總",
-        "次月佔比",
-        "本月家電加總",
-        "次月家電加總",
-        "儲值金",
-    ]]
+    ordered = ["城市"]
+    for name in REPORT_MONTH_NAMES:
+        ordered += [f"{name}加總", f"{name}佔比"]
+    ordered += REGION4_APPLIANCE_COLS + ["儲值金"]
+    return region4[ordered]
 
 
 def _build_period_overview_df(
@@ -1195,7 +1185,7 @@ def load_month_end_history() -> pd.DataFrame:
 
 def format_region4_for_display(df4: pd.DataFrame) -> pd.DataFrame:
     out = df4.copy()
-    for col in ["本月加總", "次月加總", "本月家電加總", "次月家電加總", "儲值金"]:
+    for col in REGION4_INT_COLS:
         if col in out.columns:
             out[col] = out[col].apply(lambda x: int(x) if pd.notna(x) else 0)
     return out
@@ -1204,15 +1194,13 @@ def format_region4_for_display(df4: pd.DataFrame) -> pd.DataFrame:
 def build_region4_email_html(df4):
     mail_df = df4.copy()
 
-    for col in ["本月加總", "次月加總", "本月家電加總", "次月家電加總", "儲值金"]:
+    for col in REGION4_INT_COLS:
         if col in mail_df.columns:
             mail_df[col] = mail_df[col].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "")
 
-    if "本月佔比" in mail_df.columns:
-        mail_df["本月佔比"] = mail_df["本月佔比"].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
-
-    if "次月佔比" in mail_df.columns:
-        mail_df["次月佔比"] = mail_df["次月佔比"].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+    for col in REGION4_RATIO_COLS:
+        if col in mail_df.columns:
+            mail_df[col] = mail_df[col].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
 
     html_table = mail_df.to_html(index=False, border=0)
 
@@ -1518,12 +1506,29 @@ def generate_sales_report(
 
     current_month_label = m_start[:7].replace("-", "/")
     next_month_label = n_start[:7].replace("-", "/")
-    fetch_month_ranges = []
-    seen_months = set()
+    # 本月起連續 5 個月（本月、次月、次次月、次次次月、次次次次月）；本月、次月沿用 get_ranges() 的結果。
+    month_key_by_label = {
+        current_month_label: REPORT_MONTH_KEYS[0],
+        next_month_label: REPORT_MONTH_KEYS[1],
+    }
     requested_ranges = [
         (current_month_label, m_start, m_end),
         (next_month_label, n_start, n_end),
     ]
+    base_year, base_month = int(m_start[:4]), int(m_start[5:7])
+    for offset in range(2, len(REPORT_MONTH_KEYS)):
+        month_index = base_month - 1 + offset
+        year = base_year + month_index // 12
+        month = month_index % 12 + 1
+        label = f"{year}/{month:02d}"
+        month_key_by_label[label] = REPORT_MONTH_KEYS[offset]
+        requested_ranges.append((
+            label,
+            f"{year}-{month:02d}-01",
+            f"{year}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}",
+        ))
+    fetch_month_ranges = []
+    seen_months = set()
     if include_extra_reports:
         requested_ranges.extend(report_month_ranges)
     for month_range in requested_ranges:
@@ -1681,8 +1686,7 @@ def generate_sales_report(
     report_raw_df = pd.DataFrame(merged.values())
     raw_df = report_raw_df.copy()
     if not raw_df.empty:
-        raw_df.loc[raw_df["月份"] == current_month_label, "月份"] = "本月"
-        raw_df.loc[raw_df["月份"] == next_month_label, "月份"] = "下月"
+        raw_df["月份"] = raw_df["月份"].map(lambda label: month_key_by_label.get(label, label))
 
     if raw_df.empty:
         error_msg = "沒有任何資料可輸出"

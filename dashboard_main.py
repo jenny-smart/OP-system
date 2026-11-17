@@ -7,6 +7,10 @@ import streamlit as st
 from performance_report import (
     generate_sales_report,
     LATEST_DIR,
+    REGION4_AMOUNT_COLS,
+    REGION4_APPLIANCE_COLS,
+    REGION4_INT_COLS,
+    REGION4_RATIO_COLS,
 )
 
 TZ_TAIPEI = timezone(timedelta(hours=8))
@@ -206,11 +210,15 @@ def render_sales_page():
         if not t.empty:
             total = t.iloc[0]
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("本月加總", _fmt_int(total.get("本月加總", 0)) if total is not None else "—")
-    k2.metric("次月加總", _fmt_int(total.get("次月加總", 0)) if total is not None else "—")
-    k3.metric("本月家電加總", _fmt_int(total.get("本月家電加總", 0)) if total is not None else "—")
-    k4.metric("儲值金", _fmt_int(total.get("儲值金", 0)) if total is not None else "—")
+    def _kpi(col):
+        # 舊的 df4.csv 還沒有新月份欄位時顯示「—」，按「更新資料」後就會有。
+        if total is None or col not in total.index:
+            return "—"
+        return _fmt_int(total.get(col, 0))
+
+    for cols_group in (REGION4_AMOUNT_COLS, REGION4_APPLIANCE_COLS + ["儲值金"]):
+        for st_col, col in zip(st.columns(len(cols_group)), cols_group):
+            st_col.metric(col, _kpi(col))
 
     with st.container(border=True, key="perfcard_region"):
         st.markdown('<div class="section-title">📊 各區月度摘要</div>', unsafe_allow_html=True)
@@ -220,8 +228,8 @@ def render_sales_page():
                 unsafe_allow_html=True
             )
         else:
-            int4 = {"本月加總", "次月加總", "本月家電加總", "次月家電加總", "儲值金"}
-            pct4 = {"本月佔比", "次月佔比"}
+            int4 = set(REGION4_INT_COLS)
+            pct4 = set(REGION4_RATIO_COLS)
             st.markdown(
                 render_html_table(df4, right_cols=int4 | pct4, pct_cols=pct4, int_cols=int4),
                 unsafe_allow_html=True

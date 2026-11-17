@@ -46,11 +46,11 @@ def _build_summary(rows, month_ranges):
 
 
 def generate_service_payment_report(order_start_date: str, order_end_date: str, trigger="dashboard"):
-    """依訂購日期統計家電/水洗，本月與次月的待付款及已付款。"""
+    """依訂購日期統計家電/水洗，本月起 5 個月（本月～次次次次月）的待付款及已付款。"""
     if order_end_date < order_start_date:
         raise ValueError("訂購日期迄日不可早於起日")
 
-    month_ranges = report._order_date_month_ranges()[:2]
+    month_ranges = report._order_date_month_ranges()
 
     def worker(city):
         session = requests.Session()

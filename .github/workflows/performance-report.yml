@@ -1,10 +1,20 @@
 name: Daily Performance Report
 
+run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || github.workflow }}
+
 permissions:
   contents: write
 
 on:
   workflow_dispatch:
+    inputs:
+      scheduled_slot:
+        description: tool-system Cloud Schedule Router slot (leave blank for manual runs)
+        required: false
+        type: string
+        default: ''
+  # 備援 cron：排程已併到 tool-system 主控表「排程設定」的 op_performance_report（台北 00:20／08:10／18:10，
+  # 由 Router 派送）。本 repo 設 repository variable EXTERNAL_SCHEDULER_ENABLED=true 後，這三個 cron 會略過。
   schedule:
     - cron: '7 0 * * *'    # 台北 08:07
     - cron: '7 10 * * *'   # 台北 18:07
@@ -12,6 +22,7 @@ on:
 
 jobs:
   run-performance-report:
+    if: github.event_name != 'schedule' || vars.EXTERNAL_SCHEDULER_ENABLED != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
