@@ -1017,14 +1017,9 @@ def _build_period_overview_df(
     row_id = f"{now_obj.strftime('%Y%m%d%H%M%S')}_{period_label}"
     date_text = now_obj.strftime("%Y/%m/%d %H:%M:%S")
 
-    if period_label == "次月":
-        y, m = now_obj.year, now_obj.month
-        if m == 12:
-            stat_month = f"{y + 1}/01"
-        else:
-            stat_month = f"{y}/{m + 1:02d}"
-    else:
-        stat_month = now_obj.strftime("%Y/%m")
+    offset = REPORT_MONTH_NAMES.index(period_label) if period_label in REPORT_MONTH_NAMES else 0
+    month_index = now_obj.month - 1 + offset
+    stat_month = f"{now_obj.year + month_index // 12}/{month_index % 12 + 1:02d}"
 
     def get_val(city, col):
         try:
@@ -1104,8 +1099,40 @@ def build_next_month_overview_df(df4: pd.DataFrame, source: str = "dashboard", r
     )
 
 
+# 月度追蹤的額外月份分頁：次次月、次次次月、次次次次月。本月、次月仍沿用 daily_df.csv／next_month_daily_df.csv。
+EXTRA_PERIOD_FILES = {
+    "次次月": "month3_daily_df.csv",
+    "次次次月": "month4_daily_df.csv",
+    "次次次次月": "month5_daily_df.csv",
+}
+
+
+def build_extra_period_overview_dfs(df4: pd.DataFrame, source: str = "dashboard", run_dt: Optional[datetime] = None) -> dict:
+    return {
+        name: _build_period_overview_df(
+            df4=df4,
+            source=source,
+            amount_col=f"{name}加總",
+            ratio_col=f"{name}佔比",
+            latest_filename=filename,
+            period_label=name,
+            run_dt=run_dt,
+        )
+        for name, filename in EXTRA_PERIOD_FILES.items()
+    }
+
+
+# 月底快照欄位用「當月／次月…」，df4 欄位用「本月／次月…」，兩邊依序對應。
+MONTH_END_NAMES = ["當月", "次月", "次次月", "次次次月", "次次次次月"]
+MONTH_END_COLS = (
+    ["id", "來源", "快照日期", "城市"]
+    + [c for n in MONTH_END_NAMES for c in (f"{n}業績", f"{n}佔比")]
+    + [f"{n}總業績" for n in MONTH_END_NAMES]
+)
+
+
 def build_month_end_summary_df(df4: pd.DataFrame, source: str = "dashboard") -> pd.DataFrame:
-    cols = ["id", "來源", "快照日期", "城市", "當月業績", "當月佔比", "次月業績", "次月佔比", "當月總業績", "次月總業績"]
+    cols = MONTH_END_COLS
 
     if df4 is None or df4.empty:
         return pd.DataFrame(columns=cols)
@@ -1129,23 +1156,19 @@ def build_month_end_summary_df(df4: pd.DataFrame, source: str = "dashboard") -> 
         except Exception:
             return 0
 
-    current_total = get_val("加總", "本月加總")
-    next_total = get_val("加總", "次月加總")
-
     rows = []
     for city in CITY_ORDER + ["加總"]:
-        rows.append({
+        row = {
             "id": f"{row_id_prefix}_{city}",
             "來源": source,
             "快照日期": snapshot_date,
             "城市": city,
-            "當月業績": get_val(city, "本月加總"),
-            "當月佔比": get_val(city, "本月佔比"),
-            "次月業績": get_val(city, "次月加總"),
-            "次月佔比": get_val(city, "次月佔比"),
-            "當月總業績": current_total,
-            "次月總業績": next_total,
-        })
+        }
+        for snap_name, df4_name in zip(MONTH_END_NAMES, REPORT_MONTH_NAMES):
+            row[f"{snap_name}業績"] = get_val(city, f"{df4_name}加總")
+            row[f"{snap_name}佔比"] = get_val(city, f"{df4_name}佔比")
+            row[f"{snap_name}總業績"] = get_val("加總", f"{df4_name}加總")
+        rows.append(row)
 
     out = pd.DataFrame(rows, columns=cols)
 
@@ -1178,7 +1201,7 @@ def build_month_end_summary_df(df4: pd.DataFrame, source: str = "dashboard") -> 
 
 def load_month_end_history() -> pd.DataFrame:
     ensure_dirs()
-    cols = ["id", "來源", "快照日期", "城市", "當月業績", "當月佔比", "次月業績", "次月佔比", "當月總業績", "次月總業績"]
+    cols = MONTH_END_COLS
     if not os.path.exists(MONTH_END_HISTORY_FILE):
         return pd.DataFrame(columns=cols)
     return pd.read_csv(MONTH_END_HISTORY_FILE, encoding="utf-8-sig")
@@ -1344,6 +1367,7 @@ def persist_dashboard_payload(
     order_end_date: Optional[str] = None,
     error_msg: Optional[str] = None,
     trigger: str = "dashboard",
+    extra_period_dfs: Optional[dict] = None,
 ):
     ensure_dirs()
 
@@ -1399,6 +1423,11 @@ def persist_dashboard_payload(
 
     next_month_daily_df.to_csv(latest_next_daily, index=False, encoding="utf-8-sig")
     append_output_file_log("次月統計報表", latest_next_daily, trigger)
+
+    for period_name, period_df in (extra_period_dfs or {}).items():
+        extra_path = os.path.join(LATEST_DIR, EXTRA_PERIOD_FILES[period_name])
+        period_df.to_csv(extra_path, index=False, encoding="utf-8-sig")
+        append_output_file_log(f"{period_name}統計報表", extra_path, trigger)
 
     if month_end_df is not None and not month_end_df.empty:
         month_end_df.to_csv(latest_month_end, index=False, encoding="utf-8-sig")
@@ -1469,6 +1498,11 @@ def persist_dashboard_payload(
 
     next_month_daily_df.to_csv(snap_next_daily, index=False, encoding="utf-8-sig")
     append_output_file_log("次月統計報表", snap_next_daily, trigger)
+
+    for period_name, period_df in (extra_period_dfs or {}).items():
+        extra_snap = f"{snapshot_prefix}_{EXTRA_PERIOD_FILES[period_name]}"
+        period_df.to_csv(extra_snap, index=False, encoding="utf-8-sig")
+        append_output_file_log(f"{period_name}統計報表", extra_snap, trigger)
 
     if month_end_df is not None and not month_end_df.empty:
         month_end_df.to_csv(snap_month_end, index=False, encoding="utf-8-sig")
@@ -1764,6 +1798,7 @@ def generate_sales_report(
     run_dt = now_dt()
     daily_df = build_daily_overview_df(df4, source=source, run_dt=run_dt)
     next_month_daily_df = build_next_month_overview_df(df4, source=source, run_dt=run_dt)
+    extra_period_dfs = build_extra_period_overview_dfs(df4, source=source, run_dt=run_dt)
     month_end_df = build_month_end_summary_df(df4, source=source)
 
     log(f"raw_df columns = {list(raw_df.columns)}")
@@ -1797,6 +1832,7 @@ def generate_sales_report(
             order_end_date=order_end_date if include_extra_reports else None,
             error_msg=error_msg,
             trigger=trigger,
+            extra_period_dfs=extra_period_dfs,
         )
 
     if send_email:
@@ -1810,6 +1846,7 @@ def generate_sales_report(
         "df4": format_region4_for_display(df4),
         "daily_df": daily_df,
         "next_month_daily_df": next_month_daily_df,
+        "extra_period_dfs": extra_period_dfs,
         "month_end_df": month_end_df,
         "order_date_df": order_date_df,
         "month_performance_df": month_performance_df,
