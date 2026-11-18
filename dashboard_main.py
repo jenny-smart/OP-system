@@ -285,13 +285,16 @@ def render_sales_page():
         int_d = {c for c in show_cols if "業績" in c or c == "全區合計"}
         pct_d = {c for c in show_cols if "佔比" in c}
 
+        # 紀錄會一直累積（幾百列），固定高度、表格內捲動，不要把整頁撐得很長。
         st.markdown(
-            render_html_table(
+            '<div style="max-height:360px;overflow:auto;">'
+            + render_html_table(
                 daily_df[show_cols].copy(),
                 right_cols=int_d | pct_d,
                 pct_cols=pct_d,
                 int_cols=int_d
-            ),
+            )
+            + "</div>",
             unsafe_allow_html=True
         )
 
