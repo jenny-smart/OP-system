@@ -627,17 +627,15 @@ def _dt_from_ns(ns: int) -> datetime:
         return datetime.fromtimestamp(ns / 1_000_000_000, TZ_TAIPEI)
     return datetime.now(TZ_TAIPEI)
 
+_PERIOD_NAMES = ["本月", "次月", "次次月", "次次次月", "次次次次月"]
+
+
 def _period_config(period_label: str, dt: datetime):
-    if period_label == "次月":
-        amount_col = "次月加總"
-        ratio_col = "次月佔比"
-        y, m = dt.year, dt.month
-        stat_month = f"{y + 1}/01" if m == 12 else f"{y}/{m + 1:02d}"
-    else:
-        amount_col = "本月加總"
-        ratio_col = "本月佔比"
-        stat_month = dt.strftime("%Y/%m")
-    return amount_col, ratio_col, stat_month
+    offset = _PERIOD_NAMES.index(period_label) if period_label in _PERIOD_NAMES else 0
+    name = _PERIOD_NAMES[offset]
+    month_index = dt.month - 1 + offset
+    stat_month = f"{dt.year + month_index // 12}/{month_index % 12 + 1:02d}"
+    return f"{name}加總", f"{name}佔比", stat_month
 
 
 def _build_overview_from_df4(period_label: str, row_dt = None, run_key = None) -> pd.DataFrame:
@@ -757,7 +755,7 @@ def _show_month_end_snapshot_tab():
     history_df = _read_csv_safe(history_path)
 
     if latest_df.empty and history_df.empty:
-        st.info("目前還沒有月底快照。系統會在每月最後一天更新資料時，記錄當月與次月各區業績及總業績。")
+        st.info("目前還沒有月底快照。系統會在每月最後一天更新資料時，記錄當月起 5 個月各區業績及總業績。")
         st.caption(f"目前找不到檔案：{latest_path} 或 {history_path}")
         return
 
@@ -898,12 +896,14 @@ def render_monthly_tracking_tabs():
     # 三個區塊整併在同一個頁籤區，且各自保留刪除功能。
     st.markdown(
         '<div class="page-header"><div class="page-title">月度追蹤</div>'
-        '<div class="page-subtitle">CURRENT / NEXT MONTH / SNAPSHOT</div></div>',
+        '<div class="page-subtitle">CURRENT / NEXT 4 MONTHS / SNAPSHOT</div></div>',
         unsafe_allow_html=True,
     )
 
     with st.container(key="nested_tabs_monthly"):
-        tab_current, tab_next, tab_snapshot = st.tabs(["當月每日業績", "次月每日業績", "月底快照"])
+        tab_current, tab_next, tab_m3, tab_m4, tab_m5, tab_snapshot = st.tabs(
+            ["當月每日業績", "次月每日業績", "次次月每日業績", "次次次月每日業績", "次次次次月每日業績", "月底快照"]
+        )
 
         with tab_current:
             st.caption("資料來源：上方各區月度摘要（df4.csv）的本月加總；每次『更新資料』會新增一筆，舊紀錄會保留，除非手動勾選刪除。")
@@ -912,6 +912,15 @@ def render_monthly_tracking_tabs():
         with tab_next:
             st.caption("資料來源：上方各區月度摘要（df4.csv）的次月加總；每次『更新資料』會新增一筆，舊紀錄會保留，除非手動勾選刪除。")
             _show_period_section("次月每日業績總覽", "next_month_daily_df.csv", "次月")
+
+        for tab, label, filename in [
+            (tab_m3, "次次月", "month3_daily_df.csv"),
+            (tab_m4, "次次次月", "month4_daily_df.csv"),
+            (tab_m5, "次次次次月", "month5_daily_df.csv"),
+        ]:
+            with tab:
+                st.caption(f"資料來源：上方各區月度摘要（df4.csv）的{label}加總；每次『更新資料』會新增一筆，舊紀錄會保留，除非手動勾選刪除。")
+                _show_period_section(f"{label}每日業績總覽", filename, label)
 
         with tab_snapshot:
             _show_month_end_snapshot_tab()
