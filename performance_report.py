@@ -234,6 +234,71 @@ def _extract_purchase_row_info(html: str) -> dict:
     return info
 
 
+# 保留單都掛在「檸檬保留」這個會員底下；訂單金額 = 該會員儲值金歷程裡每張訂單的扣款淨額。
+RESERVE_MEMBER_ID = 212
+
+
+def _parse_stored_value_rows(html: str) -> list:
+    """儲值金歷程表格：預約日期／服務日期／訂單編號／項目／入帳金額／扣款金額／餘額／備註。
+
+    回傳 [(訂單編號, 入帳金額, 扣款金額)]，入帳為正數、扣款為負數（沒有填就是 0）。
+    """
+    rows = []
+    try:
+        soup = BeautifulSoup(str(html or ""), "lxml")
+    except Exception:
+        soup = BeautifulSoup(str(html or ""), "html.parser")
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 6:
+            continue
+        order_match = re.search(r"\b[A-Z]{2}\d{5,}\b", cells[2].get_text(" ", strip=True))
+        if not order_match:
+            continue
+
+        def money(cell):
+            digits = re.sub(r"[^\d\-]", "", cell.get_text(strip=True))
+            return int(digits) if digits not in ("", "-") else 0
+
+        rows.append((order_match.group(0), money(cells[4]), money(cells[5])))
+    return rows
+
+
+def _fetch_stored_value_deductions(session, member_id=RESERVE_MEMBER_ID, page_workers=6, max_pages=150) -> dict:
+    """彙總儲值金歷程：回傳 {訂單編號: 實際扣儲值金金額}（扣款合計 − 返還合計）。"""
+    url = f"https://backend.lemonclean.com.tw/member/{member_id}/stored_value_histories"
+    spent, returned = {}, {}
+    seen_signatures = set()
+
+    def fetch_page(page):
+        response = session.get(url, params={"page": str(page)}, headers=HEADERS, allow_redirects=True)
+        response.raise_for_status()
+        return response.text
+
+    page = 1
+    while page <= max_pages:
+        pages = list(range(page, min(page + page_workers, max_pages + 1)))
+        with ThreadPoolExecutor(max_workers=len(pages)) as pool:
+            texts = list(pool.map(fetch_page, pages))
+        finished = False
+        for text in texts:
+            rows = _parse_stored_value_rows(text)
+            signature = tuple(rows[:3])
+            if not rows or signature in seen_signatures:
+                finished = True  # 空頁，或頁碼不被支援而回到重複的頁面
+                break
+            seen_signatures.add(signature)
+            for order_no, income, deduct in rows:
+                if deduct:
+                    spent[order_no] = spent.get(order_no, 0) + abs(deduct)
+                if income:
+                    returned[order_no] = returned.get(order_no, 0) + income
+        if finished:
+            break
+        page += len(pages)
+    return {no: spent.get(no, 0) - returned.get(no, 0) for no in set(spent) | set(returned)}
+
+
 def _fetch_purchase_items(session, page_workers=1, **filters):
     """依條件讀取所有分頁訂單並以訂單編號去重。
 
@@ -359,8 +424,12 @@ def _reserve_order_month_ranges(base: Optional[datetime] = None):
     return ranges
 
 
-def build_reserve_orders_df(records, month_ranges) -> pd.DataFrame:
-    """把保留單逐筆列出：日期、星期、時數（人數 × 每人服務時數）、專員（人數）。"""
+def build_reserve_orders_df(records, month_ranges, deductions=None) -> pd.DataFrame:
+    """把保留單逐筆列出：日期、星期、時數（人數 × 每人服務時數）、專員（人數）。
+
+    deductions：{訂單編號: 實際扣儲值金金額}；有的話訂單金額用它，沒有的訂單退回用訂單列的「總金額」。
+    """
+    deductions = deductions or {}
     rows = []
     for month_name, label, start, end in month_ranges:
         for item in records:
@@ -379,11 +448,14 @@ def build_reserve_orders_df(records, month_ranges) -> pd.DataFrame:
             people = _purchase_people(item)
             staff_names = [str(n) for n in (item.get("__staff") or []) if str(n).strip()]
             amount = item.get("__amount")
+            order_no = str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or "")
+            if order_no in deductions:
+                amount = deductions[order_no]
             rows.append({
                 "月份別": month_name,
                 "月份": label,
                 "地區": item.get("__city", ""),
-                "訂單編號": str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or ""),
+                "訂單編號": order_no,
                 "日期": date_text,
                 "星期": weekday,
                 "服務時段": str(item.get("__period") or ""),
@@ -428,10 +500,19 @@ def generate_reserve_orders_report(trigger="dashboard"):
             item["__city"] = city
         return items
 
+    def deduction_worker():
+        # 訂單金額 = 儲值金歷程的扣款；跟各地區抓單同時進行，用第一個可用帳號登入一次。
+        city = next(c for c in CITY_ORDER if c in ACCOUNTS)
+        session = requests.Session()
+        login(session, ACCOUNTS[city]["email"], ACCOUNTS[city]["password"])
+        return _fetch_stored_value_deductions(session)
+
     cities = [city for city in CITY_ORDER if city in ACCOUNTS]
     records, errors = [], []
-    with ThreadPoolExecutor(max_workers=max(1, len(cities))) as pool:
+    deductions = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(cities)) + 1) as pool:
         futures = {pool.submit(worker, city): city for city in cities}
+        deduction_future = pool.submit(deduction_worker) if cities else None
         for future in as_completed(futures):
             city = futures[future]
             try:
@@ -439,9 +520,15 @@ def generate_reserve_orders_report(trigger="dashboard"):
             except Exception as exc:
                 errors.append(f"{city} 保留單抓取失敗：{exc}")
                 log(f"⚠️ {errors[-1]}")
+        if deduction_future is not None:
+            try:
+                deductions = deduction_future.result()
+            except Exception as exc:
+                errors.append(f"儲值金歷程抓取失敗，訂單金額改用訂單列總金額：{exc}")
+                log(f"⚠️ {errors[-1]}")
     error_text = " / ".join(errors) if errors else None
 
-    df = build_reserve_orders_df(records, month_ranges)
+    df = build_reserve_orders_df(records, month_ranges, deductions)
 
     ensure_dirs()
     path = os.path.join(LATEST_DIR, RESERVE_ORDERS_FILE)
