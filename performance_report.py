@@ -194,6 +194,43 @@ def _extract_purchase_list_data(html: str):
     return data if isinstance(data, list) else []
 
 
+def _extract_purchase_row_info(html: str) -> dict:
+    """從 /purchase 頁面表格列讀出 JSON 沒有的欄位：專員姓名、付款狀態、總金額、服務時段。
+
+    專員姓名在「服務日期」欄的 /schedule/edit 連結裡（結尾帶評分 (n)，要去掉），
+    解析方式與 orders-system 的 fetch_recent_service_records 一致。回傳 {訂單編號: {...}}。
+    """
+    info = {}
+    try:
+        soup = BeautifulSoup(str(html or ""), "html.parser")
+        rows = soup.find_all("tr")
+    except Exception:
+        return info
+    for row in rows:
+        cells = row.find_all("td")
+        if len(cells) < 3:
+            continue
+        order_match = re.search(r"\b[A-Z]{2}\d{5,}\b", cells[0].get_text(" ", strip=True))
+        if not order_match:
+            continue
+        names = []
+        for link in cells[2].find_all("a", href=re.compile(r"/schedule/edit")):
+            name = re.sub(r"\(\d+\)\s*$", "", link.get_text(strip=True)).strip()
+            if name:
+                names.append(name)
+        row_text = row.get_text("\n", strip=True)
+        status_match = re.search(r"付款狀態[：:]\s*(\S+)", row_text)
+        amount_match = re.search(r"總金額[：:]\s*(-?[\d,]+)", row_text)
+        period_match = re.search(r"(\d{2}:\d{2})\s*[-~～]\s*(\d{2}:\d{2})", cells[2].get_text(" ", strip=True))
+        info[order_match.group(0)] = {
+            "__staff": names,
+            "__pay_status": status_match.group(1) if status_match else "",
+            "__amount": int(amount_match.group(1).replace(",", "")) if amount_match else None,
+            "__period": f"{period_match.group(1)}-{period_match.group(2)}" if period_match else "",
+        }
+    return info
+
+
 def _fetch_purchase_items(session, **filters):
     """依條件讀取所有分頁訂單並以訂單編號去重。"""
     seen = {}
@@ -213,9 +250,11 @@ def _fetch_purchase_items(session, **filters):
         items = _extract_purchase_list_data(response.text)
         if not items:
             break
+        row_info = _extract_purchase_row_info(response.text)
         for item in items:
             order_no = str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or "").strip()
             if order_no:
+                item.update(row_info.get(order_no, {}))
                 seen[order_no] = item
         if len(items) < 20:
             break
@@ -267,7 +306,10 @@ def _purchase_people(item) -> float:
 # 「月份業績統整」頁籤：當月、次月、次次月、次次次月的保留單明細（日期／星期／時數／專員）。
 RESERVE_ORDER_MONTH_NAMES = ["當月", "次月", "次次月", "次次次月"]
 RESERVE_ORDERS_FILE = "reserve_orders.csv"
-RESERVE_ORDER_COLS = ["月份別", "月份", "地區", "日期", "星期", "時數", "專員", "訂單編號"]
+RESERVE_ORDER_COLS = [
+    "月份別", "月份", "地區", "訂單編號", "日期", "星期", "服務時段",
+    "總人時", "專員人數", "專員姓名", "訂單金額", "付款狀態",
+]
 _WEEKDAY_NAMES = ["一", "二", "三", "四", "五", "六", "日"]
 
 
@@ -294,6 +336,9 @@ def build_reserve_orders_df(records, month_ranges) -> pd.DataFrame:
         for item in records:
             if _purchase_is_cancelled(item) or not _purchase_is_reserve(item):
                 continue
+            pay_status = str(item.get("__pay_status") or "")
+            if pay_status and pay_status != "已付款":
+                continue  # 只列付款狀態為「已付款」的保留單；讀不到狀態時不排除
             date_text = str(item.get("date_clean") or item.get("service_date") or "")[:10]
             if not (start <= date_text <= end):
                 continue
@@ -302,15 +347,21 @@ def build_reserve_orders_df(records, month_ranges) -> pd.DataFrame:
             except ValueError:
                 weekday = ""
             people = _purchase_people(item)
+            staff_names = [str(n) for n in (item.get("__staff") or []) if str(n).strip()]
+            amount = item.get("__amount")
             rows.append({
                 "月份別": month_name,
                 "月份": label,
                 "地區": item.get("__city", ""),
+                "訂單編號": str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or ""),
                 "日期": date_text,
                 "星期": weekday,
-                "時數": _purchase_person_hours(item),
-                "專員": int(people) if float(people).is_integer() else people,
-                "訂單編號": str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or ""),
+                "服務時段": str(item.get("__period") or ""),
+                "總人時": _purchase_person_hours(item),
+                "專員人數": int(people) if float(people).is_integer() else people,
+                "專員姓名": " X ".join(staff_names),
+                "訂單金額": int(amount) if amount is not None else _purchase_amount(item),
+                "付款狀態": pay_status,
             })
     df = pd.DataFrame(rows, columns=RESERVE_ORDER_COLS)
     if df.empty:
