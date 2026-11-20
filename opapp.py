@@ -1129,43 +1129,25 @@ def render_month_performance_report_tab():
         "大掃除第二階段 2027/01/22–2027/02/04，其餘為非大掃除。"
     )
 
-    tab_labels = [f"{name}（{month_labels.get(name, '')}）" if month_labels.get(name) else name for name in month_names]
-    tabs = st.tabs(tab_labels + ["依地區看每月"])
-    with tabs[-1]:
-        if view_df.empty:
-            st.info("沒有符合條件的保留單，或尚未產生保留單明細。")
-        else:
-            st.markdown("**每區每月**（每月的保留單數與訂單金額）")
-            st.dataframe(_rv.region_month_matrix(view_df, month_names), use_container_width=True, hide_index=True)
-            st.markdown("**每區各階段**（依服務日期分階段，跨月份合計）")
-            st.dataframe(_rv.region_stage_matrix(view_df), use_container_width=True, hide_index=True)
-    for tab, name in zip(tabs[:-1], month_names):
-        with tab:
-            if full_df.empty or view_df.empty or "月份別" not in view_df.columns:
-                st.info("沒有符合條件的保留單，或尚未產生保留單明細，請按「更新保留單」。")
-                continue
+    if view_df.empty:
+        st.info("沒有符合條件的保留單，或尚未產生保留單明細，請按「更新保留單」。")
+    else:
+        st.markdown("**每區每月**（每月的保留單數與訂單金額）")
+        st.dataframe(_rv.region_month_matrix(view_df, month_names), use_container_width=True, hide_index=True)
+        st.markdown("**每區各階段**（依服務日期分階段，跨月份合計）")
+        st.dataframe(_rv.region_stage_matrix(view_df), use_container_width=True, hide_index=True)
+
+    # 明細與取消放在下面，一次看一個月份。
+    if not view_df.empty and "月份別" in view_df.columns:
+        name = st.radio(
+            "明細月份", month_names, horizontal=True, key="reserve_detail_month",
+            format_func=lambda n: f"{n}（{month_labels.get(n, '')}）" if month_labels.get(n) else n,
+        )
+        for _once in (None,):
             sub = view_df[view_df["月份別"] == name].drop(columns=["月份別", "月份"]).copy()
             if sub.empty:
                 st.info(f"{name}沒有符合條件的保留單。")
                 continue
-
-            # 依地區統計（含各階段金額）
-            region = _rv.region_summary(sub)
-            st.markdown("**依地區統計**")
-            money = st.column_config.NumberColumn(format="%d", width="small")
-            st.dataframe(
-                region, use_container_width=True, hide_index=True,
-                column_config={
-                    "地區": st.column_config.TextColumn(width="small"),
-                    "保留單數": st.column_config.NumberColumn(format="%d", width="small"),
-                    "總人時": st.column_config.NumberColumn(format="%.1f", width="small"),
-                    "專員人次": st.column_config.NumberColumn(format="%d", width="small"),
-                    "訂單金額": money,
-                    "非大掃除金額": money,
-                    "大掃除第一階段金額": money,
-                    "大掃除第二階段金額": money,
-                },
-            )
 
             # 明細＋取消勾選
             st.markdown("**明細**（勾選「取消」後按下方按鈕）")

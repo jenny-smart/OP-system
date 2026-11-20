@@ -352,8 +352,14 @@ def _parse_stored_value_rows(html: str) -> list:
     return rows
 
 
-def _fetch_stored_value_deductions(session, member_id, page_workers=6, max_pages=150) -> dict:
-    """彙總儲值金歷程：回傳 {訂單編號: 實際扣儲值金金額}（扣款合計 − 返還合計）。"""
+def _fetch_stored_value_deductions(session, member_id, page_workers=6, max_pages=150, stats=None) -> dict:
+    """彙總儲值金歷程：回傳 {訂單編號: 實際扣儲值金金額}（扣款合計 − 返還合計）。
+
+    stats（選填的 dict）會填入 pages（讀到資料的頁數）、rows（歷程筆數），供診斷。
+    """
+    if stats is None:
+        stats = {}
+    stats.update({"pages": 0, "rows": 0})
     url = f"https://backend.lemonclean.com.tw/member/{member_id}/stored_value_histories"
     spent, returned = {}, {}
     seen_signatures = set()
@@ -376,6 +382,8 @@ def _fetch_stored_value_deductions(session, member_id, page_workers=6, max_pages
                 finished = True  # 空頁，或頁碼不被支援而回到重複的頁面
                 break
             seen_signatures.add(signature)
+            stats["pages"] += 1
+            stats["rows"] += len(rows)
             for order_no, income, deduct in rows:
                 if deduct:
                     spent[order_no] = spent.get(order_no, 0) + abs(deduct)
@@ -606,8 +614,19 @@ def generate_reserve_orders_report(trigger="dashboard"):
         city_deductions, city_errors = {}, [f"{city}：{m}" for m in discover_messages]
         for member_id in member_ids:
             try:
-                for order_no, amount in _fetch_stored_value_deductions(session, member_id).items():
+                stats = {}
+                found = _fetch_stored_value_deductions(session, member_id, stats=stats)
+                for order_no, amount in found.items():
                     city_deductions[order_no] = city_deductions.get(order_no, 0) + amount
+                reserve_nos = {
+                    str(i.get("order_no") or i.get("orderNo") or "") for i in items
+                    if not _purchase_is_cancelled(i) and _purchase_is_reserve(i)
+                }
+                hit = len(reserve_nos & set(found))
+                city_errors.append(
+                    f"{city}（診斷）會員 {member_id}：歷程讀到 {stats['pages']} 頁／{stats['rows']} 筆，"
+                    f"涵蓋 {len(found)} 張訂單，對上保留單 {hit}／{len(reserve_nos)} 張"
+                )
             except Exception as exc:
                 city_errors.append(f"{city} 會員 {member_id} 儲值金歷程抓取失敗，金額改用訂單列總金額：{exc}")
         return items, city_deductions, city_errors
