@@ -1073,9 +1073,12 @@ def render_month_performance_report_tab():
         else:
             with st.spinner("正在更新保留單…"):
                 result = _performance_report.generate_reserve_orders_report(trigger="dashboard")
-            if result.get("error"):
-                st.warning(result["error"])
+            # st.rerun 會清掉畫面上的訊息，所以把警告存起來，頁面上一直顯示到下次更新。
+            st.session_state["reserve_update_error"] = result.get("error") or ""
             st.rerun()
+    _reserve_error = st.session_state.get("reserve_update_error")
+    if _reserve_error:
+        st.warning("上次更新保留單的警告：\n\n" + str(_reserve_error).replace(" / ", "\n\n"))
 
     updated_at = meta.get("reserve_orders_updated_at")
     st.caption(

@@ -273,6 +273,59 @@ def _purchase_member_id(item) -> str:
     return str(value).strip()
 
 
+def _member_id_from_edit_page(session, order_no: str) -> str:
+    """打開訂單修改頁，從頁面資料（member_id）或會員連結找出訂單所屬會員編號。"""
+    digits = re.sub(r"\D", "", str(order_no or ""))
+    if not digits:
+        return ""
+    response = session.get(f"{PURCHASE_URL}/edit/{int(digits)}", headers=HEADERS, allow_redirects=True)
+    if response.status_code != 200:
+        return ""
+    text = response.text
+    for pattern in (
+        r"[\"']member_id[\"']\s*:\s*[\"']?(\d+)",
+        r"member_id[\"']?\s*[=:]\s*[\"']?(\d+)",
+        r"/member/(?:edit/)?(\d+)",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _discover_member_ids(session, items):
+    """找出這個地區保留單所屬的會員編號。回傳 (會員編號集合, 找不到時的說明)。
+
+    先看訂單資料／訂單列連結；某位顧客名下的訂單都沒有時，各抽一張打開修改頁找。
+    """
+    reserve = [i for i in items if not _purchase_is_cancelled(i) and _purchase_is_reserve(i)]
+    ids, messages = set(), []
+    known_names, missing = set(), {}
+    for item in reserve:
+        name = str(item.get("name") or item.get("customer_name") or "")
+        member_id = _purchase_member_id(item)
+        if member_id:
+            ids.add(member_id)
+            known_names.add(name)
+        else:
+            missing.setdefault(name, item)
+    for name, item in missing.items():
+        if name in known_names:
+            continue
+        order_no = str(item.get("order_no") or item.get("orderNo") or "")
+        try:
+            member_id = _member_id_from_edit_page(session, order_no)
+        except Exception as exc:
+            member_id, order_no = "", f"{order_no}（{exc}）"
+        if member_id:
+            ids.add(member_id)
+        else:
+            messages.append(f"找不到會員編號（顧客「{name}」，訂單 {order_no}）")
+    if reserve and not ids:
+        messages.append("訂單資料欄位：" + ",".join(sorted(reserve[0].keys())))
+    return ids, messages
+
+
 def _parse_stored_value_rows(html: str) -> list:
     """儲值金歷程表格：預約日期／服務日期／訂單編號／項目／入帳金額／扣款金額／餘額／備註。
 
@@ -548,13 +601,9 @@ def generate_reserve_orders_report(trigger="dashboard"):
 
         # 訂單金額 = 保留單會員的儲值金歷程扣款。每個地區的保留單會員編號不同，
         # 從該地區保留單本身取得，並用該地區帳號讀取；失敗只影響金額（退回訂單列總金額）。
-        member_ids = sorted({
-            _purchase_member_id(item) for item in items
-            if not _purchase_is_cancelled(item) and _purchase_is_reserve(item) and _purchase_member_id(item)
-        })
-        city_deductions, city_errors = {}, []
-        if not member_ids:
-            city_errors.append(f"{city}：訂單資料找不到保留單會員編號，訂單金額改用訂單列總金額")
+        found_ids, discover_messages = _discover_member_ids(session, items)
+        member_ids = sorted(found_ids)
+        city_deductions, city_errors = {}, [f"{city}：{m}" for m in discover_messages]
         for member_id in member_ids:
             try:
                 for order_no, amount in _fetch_stored_value_deductions(session, member_id).items():
