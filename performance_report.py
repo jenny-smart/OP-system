@@ -229,7 +229,13 @@ def _extract_purchase_row_info(html: str) -> dict:
         for link in row.find_all("a", href=re.compile(r"/member/(?:edit/)?\d+")):
             member_id = re.search(r"/member/(?:edit/)?(\d+)", link.get("href", "")).group(1)
             break
+        address = ""
+        for line in cells[1].get_text("\n", strip=True).splitlines():
+            if _ADDRESS_LINE.match(line.strip()):
+                address = line.strip()
+                break
         info[order_match.group(0)] = {
+            "__address": address,
             "__member_id": member_id,
             "__staff": names,
             "__pay_status": status_match.group(1) if status_match else "",
@@ -237,6 +243,28 @@ def _extract_purchase_row_info(html: str) -> dict:
             "__period": f"{period_match.group(1)}-{period_match.group(2)}" if period_match else "",
         }
     return info
+
+
+_ADDRESS_LINE = re.compile(
+    r"^(?:台|臺|新北|桃園|台中|臺中|台南|臺南|高雄|基隆|新竹|嘉義|苗栗|彰化|南投|雲林|屏東|宜蘭|花蓮|台東|臺東)"
+    r".{0,3}[市縣].*[區鄉鎮市路街]"
+)
+
+
+def _city_from_address(address) -> str:
+    """依服務地址的縣市判斷地區；判斷不出來回傳空字串（呼叫端改用抓到訂單的帳號地區）。"""
+    text = str(address or "").strip().replace("臺", "台")
+    if text.startswith("新竹"):
+        return "新竹"
+    if text.startswith(("高雄", "台南")):
+        return "高雄"
+    if text.startswith("桃園"):
+        return "桃園"
+    if text.startswith("台中"):
+        return "台中"
+    if text.startswith(("台北", "新北")):
+        return "台北"
+    return ""
 
 
 def _purchase_member_id(item) -> str:
@@ -438,6 +466,18 @@ def build_reserve_orders_df(records, month_ranges, deductions=None) -> pd.DataFr
     """
     deductions = deductions or {}
     rows = []
+    # 各地區帳號看到的訂單會重疊（同一張單會從好幾個帳號抓到），
+    # 所以依訂單編號去重；地區以「服務地址」判斷，不是抓到它的帳號。
+    city_rank = {city: i for i, city in enumerate(CITY_ORDER)}
+    ordered_records = sorted(records, key=lambda r: city_rank.get(r.get("__city"), len(city_rank)))
+    unique_records, seen_orders = [], set()
+    for item in ordered_records:
+        key = str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or "")
+        if key and key in seen_orders:
+            continue
+        seen_orders.add(key)
+        unique_records.append(item)
+    records = unique_records
     for month_name, label, start, end in month_ranges:
         for item in records:
             if _purchase_is_cancelled(item) or not _purchase_is_reserve(item):
@@ -461,7 +501,7 @@ def build_reserve_orders_df(records, month_ranges, deductions=None) -> pd.DataFr
             rows.append({
                 "月份別": month_name,
                 "月份": label,
-                "地區": item.get("__city", ""),
+                "地區": _city_from_address(item.get("__address") or item.get("address")) or item.get("__city", ""),
                 "訂單編號": order_no,
                 "日期": date_text,
                 "星期": weekday,
