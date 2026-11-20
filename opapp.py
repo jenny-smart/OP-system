@@ -1073,9 +1073,12 @@ def render_month_performance_report_tab():
         else:
             with st.spinner("正在更新保留單…"):
                 result = _performance_report.generate_reserve_orders_report(trigger="dashboard")
-            if result.get("error"):
-                st.warning(result["error"])
+            # st.rerun 會清掉畫面上的訊息，所以把警告存起來，頁面上一直顯示到下次更新。
+            st.session_state["reserve_update_error"] = result.get("error") or ""
             st.rerun()
+    _reserve_error = st.session_state.get("reserve_update_error")
+    if _reserve_error:
+        st.warning("上次更新保留單的警告：\n\n" + str(_reserve_error).replace(" / ", "\n\n"))
 
     updated_at = meta.get("reserve_orders_updated_at")
     st.caption(
@@ -1105,36 +1108,51 @@ def render_month_performance_report_tab():
         "只看專員含「檸檬人」的保留單", value=False, key="reserve_only_lemon",
     )
     nonce = st.session_state.get("reserve_cancel_nonce", 0)
-    city_order = ["台北", "台中", "桃園", "新竹", "高雄"]
+    import reserve_views as _rv
 
-    tabs = st.tabs([f"{name}（{month_labels.get(name, '')}）" if month_labels.get(name) else name for name in month_names])
-    for tab, name in zip(tabs, month_names):
+    # 地區篩選（用表單選要顯示哪些地區）；取消保留單後改寫 CSV 時仍用完整的 df。
+    full_df = df
+    view_df = pd.DataFrame()
+    if not df.empty and "地區" in df.columns:
+        region_options = [c for c in _rv.CITY_ORDER if c in set(df["地區"])] + sorted(
+            c for c in set(df["地區"].dropna()) if c not in _rv.CITY_ORDER
+        )
+        picked_regions = st.multiselect(
+            "顯示地區", region_options, default=region_options, key="reserve_regions",
+            help="只看選到的地區；全部取消選取則不顯示任何資料。",
+        )
+        view_df = _rv.prepare_reserve_df(df[df["地區"].isin(picked_regions)])
+        if only_lemon:
+            view_df = view_df[view_df["專員姓名"].fillna("").astype(str).str.contains("檸檬人", regex=False)]
+    st.caption(
+        "訂單金額依服務日期分階段：大掃除第一階段 2026/12/15–2027/01/21、"
+        "大掃除第二階段 2027/01/22–2027/02/04，其餘為非大掃除。"
+    )
+
+    tab_labels = [f"{name}（{month_labels.get(name, '')}）" if month_labels.get(name) else name for name in month_names]
+    tabs = st.tabs(tab_labels + ["依地區看每月"])
+    with tabs[-1]:
+        if view_df.empty:
+            st.info("沒有符合條件的保留單，或尚未產生保留單明細。")
+        else:
+            st.markdown("**每區每月**（每月的保留單數與訂單金額）")
+            st.dataframe(_rv.region_month_matrix(view_df, month_names), use_container_width=True, hide_index=True)
+            st.markdown("**每區各階段**（依服務日期分階段，跨月份合計）")
+            st.dataframe(_rv.region_stage_matrix(view_df), use_container_width=True, hide_index=True)
+    for tab, name in zip(tabs[:-1], month_names):
         with tab:
-            if df.empty or "月份別" not in df.columns:
-                st.info("尚未產生保留單明細，請按「更新保留單」。")
+            if full_df.empty or view_df.empty or "月份別" not in view_df.columns:
+                st.info("沒有符合條件的保留單，或尚未產生保留單明細，請按「更新保留單」。")
                 continue
-            sub = df[df["月份別"] == name].drop(columns=["月份別", "月份"]).copy()
-            if only_lemon:
-                sub = sub[sub["專員姓名"].fillna("").astype(str).str.contains("檸檬人", regex=False)]
+            sub = view_df[view_df["月份別"] == name].drop(columns=["月份別", "月份"]).copy()
             if sub.empty:
                 st.info(f"{name}沒有符合條件的保留單。")
                 continue
-            for col in ("總人時", "專員人數", "訂單金額"):
-                sub[col] = pd.to_numeric(sub[col], errors="coerce").fillna(0)
 
-            # 依地區統計
-            region = (
-                sub.groupby("地區")
-                .agg(保留單數=("訂單編號", "count"), 總人時=("總人時", "sum"),
-                     專員人次=("專員人數", "sum"), 訂單金額=("訂單金額", "sum"))
-                .reset_index()
-            )
-            region["__o"] = region["地區"].map(lambda c: city_order.index(c) if c in city_order else len(city_order))
-            region = region.sort_values("__o").drop(columns="__o")
-            total_row = {"地區": "合計", "保留單數": region["保留單數"].sum(), "總人時": region["總人時"].sum(),
-                         "專員人次": region["專員人次"].sum(), "訂單金額": region["訂單金額"].sum()}
-            region = pd.concat([region, pd.DataFrame([total_row])], ignore_index=True)
+            # 依地區統計（含各階段金額）
+            region = _rv.region_summary(sub)
             st.markdown("**依地區統計**")
+            money = st.column_config.NumberColumn(format="%d", width="small")
             st.dataframe(
                 region, use_container_width=True, hide_index=True,
                 column_config={
@@ -1142,14 +1160,17 @@ def render_month_performance_report_tab():
                     "保留單數": st.column_config.NumberColumn(format="%d", width="small"),
                     "總人時": st.column_config.NumberColumn(format="%.1f", width="small"),
                     "專員人次": st.column_config.NumberColumn(format="%d", width="small"),
-                    "訂單金額": st.column_config.NumberColumn(format="%d", width="small"),
+                    "訂單金額": money,
+                    "非大掃除金額": money,
+                    "大掃除第一階段金額": money,
+                    "大掃除第二階段金額": money,
                 },
             )
 
             # 明細＋取消勾選
             st.markdown("**明細**（勾選「取消」後按下方按鈕）")
             # 訂單金額放在專員姓名前面，避免窄螢幕要往右捲才看得到。
-            detail = sub[["地區", "訂單編號", "日期", "星期", "服務時段", "總人時", "訂單金額", "專員姓名"]].copy()
+            detail = sub[["地區", "訂單編號", "日期", "星期", "服務時段", "總人時", "階段", "訂單金額", "專員姓名"]].copy()
             detail.insert(0, "取消", False)
             edited = st.data_editor(
                 detail, use_container_width=True, hide_index=True, height=360,
@@ -1163,7 +1184,7 @@ def render_month_performance_report_tab():
                     "總人時": st.column_config.NumberColumn(format="%.1f", width="small"),
                     "訂單金額": st.column_config.NumberColumn(format="%d", width="small"),
                 },
-                key=f"reserve_editor_{name}_{int(only_lemon)}_{nonce}",
+                key=f"reserve_editor_{name}_{int(only_lemon)}_{'-'.join(picked_regions)}_{nonce}",
             )
             picked = edited[edited["取消"]]
             if picked.empty:
@@ -1179,7 +1200,7 @@ def render_month_performance_report_tab():
                     results = _reserve_cancel.cancel_reserve_orders(picked[["地區", "訂單編號"]].to_dict("records"))
                 done = {r["訂單編號"] for r in results if r.get("ok")}
                 if done:
-                    keep = df[~df["訂單編號"].astype(str).isin(done)]
+                    keep = full_df[~full_df["訂單編號"].astype(str).isin(done)]
                     keep.to_csv(os.path.join(LATEST_DIR, "reserve_orders.csv"), index=False, encoding="utf-8-sig")
                 st.session_state["reserve_cancel_nonce"] = nonce + 1
                 st.session_state["reserve_cancel_results"] = pd.DataFrame(results)[["地區", "訂單編號", "ok", "message"]]
