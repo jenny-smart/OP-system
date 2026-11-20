@@ -329,11 +329,19 @@ def generate_reserve_orders_report(trigger="dashboard"):
         session = requests.Session()
         account = ACCOUNTS[city]
         login(session, account["email"], account["password"])
-        items = _fetch_purchase_items(
-            session,
-            clean_date_s=month_ranges[0][2],
-            clean_date_e=month_ranges[-1][3],
-        )
+
+        # 4 個月各自查詢並同時進行（原本是一個長區間逐頁抓，最慢）。
+        def fetch_month(month_range):
+            return _fetch_purchase_items(
+                session,
+                clean_date_s=month_range[2],
+                clean_date_e=month_range[3],
+            )
+
+        items = []
+        with ThreadPoolExecutor(max_workers=len(month_ranges)) as month_pool:
+            for month_items in month_pool.map(fetch_month, month_ranges):
+                items.extend(month_items)
         for item in items:
             item["__city"] = city
         return items

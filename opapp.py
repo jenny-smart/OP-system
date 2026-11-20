@@ -1059,7 +1059,7 @@ def render_month_performance_report_tab():
     meta = _load_report_meta()
 
     st.markdown(
-        '<div class="page-header"><div class="page-title">月份業績統整</div>'
+        '<div class="page-header"><div class="page-title">保留單明細</div>'
         '<div class="page-subtitle">RESERVE ORDERS</div></div>',
         unsafe_allow_html=True,
     )
@@ -1118,7 +1118,7 @@ def render_performance_report_page():
     current_tab, order_tab, month_tab = st.tabs([
         "📍 目前總表",
         "🧾 訂購日期付款彙總",
-        "📅 月份業績統整",
+        "📅 保留單明細",
     ])
     with current_tab:
         _render_page_without_builtin_daily_overview()
