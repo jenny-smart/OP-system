@@ -1064,11 +1064,18 @@ def render_month_performance_report_tab():
         unsafe_allow_html=True,
     )
     if st.button("🔄 更新保留單", key="update_reserve_orders", use_container_width=True):
-        with st.spinner("正在更新保留單…"):
-            result = _performance_report.generate_reserve_orders_report(trigger="dashboard")
-        if result.get("error"):
-            st.warning(result["error"])
-        st.rerun()
+        # 部署新版後，Streamlit 行程裡可能還留著舊版 performance_report；沒有新函式就重新載入一次。
+        if not hasattr(_performance_report, "generate_reserve_orders_report"):
+            import importlib
+            importlib.reload(_performance_report)
+        if not hasattr(_performance_report, "generate_reserve_orders_report"):
+            st.error("程式尚未更新完成，請到 Manage app 按 Reboot app 後再試。")
+        else:
+            with st.spinner("正在更新保留單…"):
+                result = _performance_report.generate_reserve_orders_report(trigger="dashboard")
+            if result.get("error"):
+                st.warning(result["error"])
+            st.rerun()
 
     updated_at = meta.get("reserve_orders_updated_at")
     st.caption(
@@ -1078,13 +1085,16 @@ def render_month_performance_report_tab():
     if meta.get("reserve_orders_error"):
         st.warning(meta["reserve_orders_error"])
 
-    df = _read_csv_safe(os.path.join(LATEST_DIR, _performance_report.RESERVE_ORDERS_FILE))
-    month_names = _performance_report.RESERVE_ORDER_MONTH_NAMES
+    # 檔名與月份名稱在這裡自己定義，不依賴 performance_report 是否已是新版。
+    df = _read_csv_safe(os.path.join(LATEST_DIR, "reserve_orders.csv"))
+    month_names = ["當月", "次月", "次次月", "次次次月"]
+    today = datetime.now(TZ_TAIPEI)
     month_labels = {}
+    for offset, name in enumerate(month_names):
+        month_index = today.month - 1 + offset
+        month_labels[name] = f"{today.year + month_index // 12}/{month_index % 12 + 1:02d}"
     if not df.empty and {"月份別", "月份"} <= set(df.columns):
-        month_labels = dict(zip(df["月份別"], df["月份"]))
-    else:
-        month_labels = {name: label for name, label, _, _ in _performance_report._reserve_order_month_ranges()}
+        month_labels.update(dict(zip(df["月份別"], df["月份"])))
 
     tabs = st.tabs([f"{name}（{month_labels.get(name, '')}）" if month_labels.get(name) else name for name in month_names])
     for tab, name in zip(tabs, month_names):
