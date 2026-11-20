@@ -1057,46 +1057,51 @@ def render_order_date_report_tab():
 
 def render_month_performance_report_tab():
     meta = _load_report_meta()
-    current_month = datetime.now(TZ_TAIPEI).date().replace(day=1)
-    default_start = _month_date(meta.get("report_start_month"), current_month)
-    default_end = _month_date(meta.get("report_end_month"), default_start)
 
     st.markdown(
         '<div class="page-header"><div class="page-title">月份業績統整</div>'
-        '<div class="page-subtitle">PERFORMANCE / RESERVE</div></div>',
+        '<div class="page-subtitle">RESERVE ORDERS</div></div>',
         unsafe_allow_html=True,
     )
-    cols = st.columns(2)
-    with cols[0]:
-        month_start = st.date_input(
-            "起始月份（日期只取年月）",
-            value=default_start,
-            key="performance_report_start_month",
-        )
-    with cols[1]:
-        month_end = st.date_input(
-            "結束月份（日期只取年月）",
-            value=default_end,
-            key="performance_report_end_month",
-        )
-    if month_start.replace(day=1) > month_end.replace(day=1):
-        st.error("結束月份不可早於起始月份")
-    if st.button("✅ 確定並套用月份區間", key="apply_month_range", use_container_width=True):
-        _run_filtered_performance_report("month")
-    st.caption("起迄月份均包含在統計範圍內，最多可選 24 個月。")
+    if st.button("🔄 更新保留單", key="update_reserve_orders", use_container_width=True):
+        with st.spinner("正在更新保留單…"):
+            result = _performance_report.generate_reserve_orders_report(trigger="dashboard")
+        if result.get("error"):
+            st.warning(result["error"])
+        st.rerun()
 
-    with st.container(border=True, key="perfcard_net"):
-        st.markdown('<div class="section-title">➖ 該月業績－該月保留單業績</div>', unsafe_allow_html=True)
-        _show_summary_csv("net_performance_summary.csv", "尚未產生扣除後業績，請先套用月份區間。")
+    updated_at = meta.get("reserve_orders_updated_at")
+    st.caption(
+        "當月、次月、次次月、次次次月的保留單明細；時數＝專員人數 × 每人服務時數，專員＝人數。"
+        + (f"　最後更新：{updated_at}" if updated_at else "")
+    )
+    if meta.get("reserve_orders_error"):
+        st.warning(meta["reserve_orders_error"])
 
-    with st.container(border=True, key="perfcard_month"):
-        st.markdown('<div class="section-title">📊 該月業績報表</div>', unsafe_allow_html=True)
-        _show_summary_csv("month_performance_summary.csv", "尚未產生該月業績，請先套用月份區間。")
+    df = _read_csv_safe(os.path.join(LATEST_DIR, _performance_report.RESERVE_ORDERS_FILE))
+    month_names = _performance_report.RESERVE_ORDER_MONTH_NAMES
+    month_labels = {}
+    if not df.empty and {"月份別", "月份"} <= set(df.columns):
+        month_labels = dict(zip(df["月份別"], df["月份"]))
+    else:
+        month_labels = {name: label for name, label, _, _ in _performance_report._reserve_order_month_ranges()}
 
-    with st.container(border=True, key="perfcard_reserve"):
-        st.markdown('<div class="section-title">🕒 該月保留單業績</div>', unsafe_allow_html=True)
-        st.caption("保留單時數以『人數 × 每人服務時數』計算。")
-        _show_summary_csv("reserve_summary.csv", "尚未產生保留單業績，請先套用月份區間。")
+    tabs = st.tabs([f"{name}（{month_labels.get(name, '')}）" if month_labels.get(name) else name for name in month_names])
+    for tab, name in zip(tabs, month_names):
+        with tab:
+            if df.empty or "月份別" not in df.columns:
+                st.info("尚未產生保留單明細，請按「更新保留單」。")
+                continue
+            sub = df[df["月份別"] == name].drop(columns=["月份別", "月份"])
+            if sub.empty:
+                st.info(f"{name}沒有保留單。")
+                continue
+            hours = pd.to_numeric(sub["時數"], errors="coerce").fillna(0)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("保留單數", f"{len(sub):,}")
+            m2.metric("總時數", f"{hours.sum():,.1f}".rstrip("0").rstrip("."))
+            m3.metric("專員人次", f"{int(pd.to_numeric(sub['專員'], errors='coerce').fillna(0).sum()):,}")
+            st.dataframe(sub, use_container_width=True, hide_index=True, height=360)
 
 
 def render_performance_report_page():

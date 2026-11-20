@@ -256,6 +256,104 @@ def _purchase_person_hours(item) -> float:
     return people * hours
 
 
+def _purchase_people(item) -> float:
+    """保留單的專員人數。"""
+    try:
+        return float(item.get("person") or item.get("people") or item.get("cleaner_count") or 1)
+    except Exception:
+        return 1
+
+
+# 「月份業績統整」頁籤：當月、次月、次次月、次次次月的保留單明細（日期／星期／時數／專員）。
+RESERVE_ORDER_MONTH_NAMES = ["當月", "次月", "次次月", "次次次月"]
+RESERVE_ORDERS_FILE = "reserve_orders.csv"
+RESERVE_ORDER_COLS = ["月份別", "月份", "地區", "日期", "星期", "時數", "專員", "訂單編號"]
+_WEEKDAY_NAMES = ["一", "二", "三", "四", "五", "六", "日"]
+
+
+def _reserve_order_month_ranges(base: Optional[datetime] = None):
+    base = (base or now_dt()).replace(day=1)
+    ranges = []
+    for offset, name in enumerate(RESERVE_ORDER_MONTH_NAMES):
+        month_index = base.month - 1 + offset
+        year = base.year + month_index // 12
+        month = month_index % 12 + 1
+        ranges.append((
+            name,
+            f"{year}/{month:02d}",
+            f"{year}-{month:02d}-01",
+            f"{year}-{month:02d}-{calendar.monthrange(year, month)[1]:02d}",
+        ))
+    return ranges
+
+
+def build_reserve_orders_df(records, month_ranges) -> pd.DataFrame:
+    """把保留單逐筆列出：日期、星期、時數（人數 × 每人服務時數）、專員（人數）。"""
+    rows = []
+    for month_name, label, start, end in month_ranges:
+        for item in records:
+            if _purchase_is_cancelled(item) or not _purchase_is_reserve(item):
+                continue
+            date_text = str(item.get("date_clean") or item.get("service_date") or "")[:10]
+            if not (start <= date_text <= end):
+                continue
+            try:
+                weekday = "週" + _WEEKDAY_NAMES[datetime.strptime(date_text, "%Y-%m-%d").weekday()]
+            except ValueError:
+                weekday = ""
+            people = _purchase_people(item)
+            rows.append({
+                "月份別": month_name,
+                "月份": label,
+                "地區": item.get("__city", ""),
+                "日期": date_text,
+                "星期": weekday,
+                "時數": _purchase_person_hours(item),
+                "專員": int(people) if float(people).is_integer() else people,
+                "訂單編號": str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or ""),
+            })
+    df = pd.DataFrame(rows, columns=RESERVE_ORDER_COLS)
+    if df.empty:
+        return df
+    city_rank = {city: i for i, city in enumerate(CITY_ORDER)}
+    df["__c"] = df["地區"].map(lambda c: city_rank.get(c, len(city_rank)))
+    df["__m"] = df["月份別"].map(RESERVE_ORDER_MONTH_NAMES.index)
+    return df.sort_values(["__m", "日期", "__c"]).drop(columns=["__c", "__m"]).reset_index(drop=True)
+
+
+def generate_reserve_orders_report(trigger="dashboard"):
+    """只更新「月份業績統整」的保留單明細（當月～次次次月），並行處理各地區。"""
+    month_ranges = _reserve_order_month_ranges()
+
+    def worker(city):
+        session = requests.Session()
+        account = ACCOUNTS[city]
+        login(session, account["email"], account["password"])
+        items = _fetch_purchase_items(
+            session,
+            clean_date_s=month_ranges[0][2],
+            clean_date_e=month_ranges[-1][3],
+        )
+        for item in items:
+            item["__city"] = city
+        return items
+
+    city_results, errors = _parallel_city_results(worker)
+    records = [item for _, items in city_results for item in items]
+    df = build_reserve_orders_df(records, month_ranges)
+
+    ensure_dirs()
+    path = os.path.join(LATEST_DIR, RESERVE_ORDERS_FILE)
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    append_output_file_log("保留單明細", path, trigger)
+    _update_latest_meta(
+        reserve_orders_rows=int(len(df)),
+        reserve_orders_updated_at=now_dt().strftime("%Y-%m-%d %H:%M:%S"),
+        reserve_orders_error=" / ".join(errors) if errors else None,
+    )
+    return {"reserve_orders_df": df, "error": " / ".join(errors) if errors else None}
+
+
 def build_order_date_summary(raw_df: pd.DataFrame, month_rows=None) -> pd.DataFrame:
     """依地區統計待付款／已付款／合計，待付款/已付款底下再依「服務日期」拆出固定的
     月份欄位（本月＋4個月），並把「儲值金」拆成同一列裡的獨立欄位（只分待付款/
@@ -1834,6 +1932,12 @@ def generate_sales_report(
             trigger=trigger,
             extra_period_dfs=extra_period_dfs,
         )
+        if include_extra_reports:
+            # 「月份業績統整」頁籤的保留單明細（當月～次次次月）；失敗不影響主報表。
+            try:
+                generate_reserve_orders_report(trigger=trigger)
+            except Exception as exc:
+                log(f"⚠️ 保留單明細更新失敗：{exc}")
 
     if send_email:
         send_region4_email(df4)
