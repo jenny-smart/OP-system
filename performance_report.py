@@ -202,7 +202,10 @@ def _extract_purchase_row_info(html: str) -> dict:
     """
     info = {}
     try:
-        soup = BeautifulSoup(str(html or ""), "html.parser")
+        try:
+            soup = BeautifulSoup(str(html or ""), "lxml")  # 比 html.parser 快很多
+        except Exception:
+            soup = BeautifulSoup(str(html or ""), "html.parser")
         rows = soup.find_all("tr")
     except Exception:
         return info
@@ -231,10 +234,17 @@ def _extract_purchase_row_info(html: str) -> dict:
     return info
 
 
-def _fetch_purchase_items(session, **filters):
-    """依條件讀取所有分頁訂單並以訂單編號去重。"""
+def _fetch_purchase_items(session, page_workers=1, **filters):
+    """依條件讀取所有分頁訂單並以訂單編號去重。
+
+    page_workers > 1 時一次同時抓多頁（一批 page_workers 頁），再依頁碼順序處理；
+    遇到空頁或不滿 20 筆的頁就停止。預設 1 = 原本逐頁抓取的行為。
+    """
     seen = {}
-    for page in range(1, 81):
+    max_pages = 80
+    wave = max(1, int(page_workers or 1))
+
+    def fetch_page(page):
         params = {
             "keyword": "", "name": "", "phone": "", "orderNo": "",
             "date_s": "", "date_e": "", "clean_date_s": "", "clean_date_e": "",
@@ -247,17 +257,37 @@ def _fetch_purchase_items(session, **filters):
         params.update({k: v for k, v in filters.items() if v not in (None, "")})
         response = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
         response.raise_for_status()
-        items = _extract_purchase_list_data(response.text)
+        return response.text
+
+    def handle_page(text):
+        """回傳 True 表示還有下一頁。"""
+        items = _extract_purchase_list_data(text)
         if not items:
-            break
-        row_info = _extract_purchase_row_info(response.text)
+            return False
+        row_info = _extract_purchase_row_info(text)
         for item in items:
             order_no = str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or "").strip()
             if order_no:
                 item.update(row_info.get(order_no, {}))
                 seen[order_no] = item
-        if len(items) < 20:
+        return len(items) >= 20
+
+    page = 1
+    while page <= max_pages:
+        pages = list(range(page, min(page + wave, max_pages + 1)))
+        if len(pages) == 1:
+            texts = [fetch_page(pages[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=len(pages)) as pool:
+                texts = list(pool.map(fetch_page, pages))
+        more = True
+        for text in texts:
+            if not handle_page(text):
+                more = False
+                break
+        if not more:
             break
+        page += len(pages)
     return list(seen.values())
 
 
@@ -385,6 +415,7 @@ def generate_reserve_orders_report(trigger="dashboard"):
         def fetch_month(month_range):
             return _fetch_purchase_items(
                 session,
+                page_workers=3,  # 每個月一次同時抓 3 頁
                 clean_date_s=month_range[2],
                 clean_date_e=month_range[3],
             )

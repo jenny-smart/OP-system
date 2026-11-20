@@ -70,3 +70,33 @@ def test_extract_purchase_row_info_reads_staff_status_amount_period():
 def test_build_reserve_orders_empty():
     df = report.build_reserve_orders_df([], report._reserve_order_month_ranges(datetime(2026, 11, 20)))
     assert df.empty and list(df.columns) == report.RESERVE_ORDER_COLS
+
+
+def test_fetch_purchase_items_parallel_pages_match_sequential():
+    import json
+
+    class FakeResponse:
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            pass
+
+    class FakeSession:
+        def __init__(self):
+            self.pages = []
+
+        def get(self, url, params=None, **kwargs):
+            page = int(params["page"])
+            self.pages.append(page)
+            counts = {1: 20, 2: 20, 3: 5}
+            n = counts.get(page, 0)
+            data = [{"order_no": f"LC{page:02d}{i:04d}"} for i in range(n)]
+            return FakeResponse("purchaseList: " + json.dumps({"data": data}))
+
+    sequential = report._fetch_purchase_items(FakeSession())
+    parallel_session = FakeSession()
+    parallel = report._fetch_purchase_items(parallel_session, page_workers=3)
+    assert len(sequential) == len(parallel) == 45
+    assert {i["order_no"] for i in sequential} == {i["order_no"] for i in parallel}
+    assert sorted(parallel_session.pages) == [1, 2, 3]
