@@ -32,7 +32,7 @@ def test_fetch_stored_value_deductions_nets_returns_and_stops_on_empty_page():
         def get(self, url, params=None, **kwargs):
             return FakeResponse(STORED_VALUE_HTML if params["page"] == "1" else "<table></table>")
 
-    result = report._fetch_stored_value_deductions(FakeSession(), page_workers=2)
+    result = report._fetch_stored_value_deductions(FakeSession(), "212", page_workers=2)
     assert result == {"LC00221045": 4500, "LC00221022": 0}
 
 
@@ -44,7 +44,7 @@ def test_fetch_stored_value_deductions_stops_when_page_param_is_ignored():
             FakeSession.calls += 1
             return FakeResponse(STORED_VALUE_HTML)  # 每一頁都回一樣的內容
 
-    result = report._fetch_stored_value_deductions(FakeSession(), page_workers=3, max_pages=30)
+    result = report._fetch_stored_value_deductions(FakeSession(), "212", page_workers=3, max_pages=30)
     assert result["LC00221045"] == 4500  # 重複頁不重複計算
     assert FakeSession.calls <= 3
 
@@ -55,3 +55,13 @@ def test_build_reserve_orders_uses_stored_value_deduction_as_amount():
                 "person": 2, "hour": 3, "__amount": 0, "__pay_status": "已付款"}]
     df = report.build_reserve_orders_df(records, ranges, {"LC00221045": 4500})
     assert df.iloc[0]["訂單金額"] == 4500
+
+
+def test_member_id_comes_from_json_or_row_link():
+    assert report._purchase_member_id({"member_id": 212}) == "212"
+    assert report._purchase_member_id({"__member_id": "318"}) == "318"
+    assert report._purchase_member_id({}) == ""
+    html = """<table><tr><td>LC00219433</td>
+      <td><a href="https://backend.lemonclean.com.tw/member/edit/318">檸檬保留</a></td>
+      <td>2027-02-24 09:00 - 12:00</td><td>付款狀態：已付款</td></tr></table>"""
+    assert report._extract_purchase_row_info(html)["LC00219433"]["__member_id"] == "318"

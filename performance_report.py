@@ -225,7 +225,12 @@ def _extract_purchase_row_info(html: str) -> dict:
         status_match = re.search(r"付款狀態[：:]\s*(\S+)", row_text)
         amount_match = re.search(r"總金額[：:]\s*(-?[\d,]+)", row_text)
         period_match = re.search(r"(\d{2}:\d{2})\s*[-~～]\s*(\d{2}:\d{2})", cells[2].get_text(" ", strip=True))
+        member_id = ""
+        for link in row.find_all("a", href=re.compile(r"/member/(?:edit/)?\d+")):
+            member_id = re.search(r"/member/(?:edit/)?(\d+)", link.get("href", "")).group(1)
+            break
         info[order_match.group(0)] = {
+            "__member_id": member_id,
             "__staff": names,
             "__pay_status": status_match.group(1) if status_match else "",
             "__amount": int(amount_match.group(1).replace(",", "")) if amount_match else None,
@@ -234,8 +239,10 @@ def _extract_purchase_row_info(html: str) -> dict:
     return info
 
 
-# 保留單都掛在「檸檬保留」這個會員底下；訂單金額 = 該會員儲值金歷程裡每張訂單的扣款淨額。
-RESERVE_MEMBER_ID = 212
+def _purchase_member_id(item) -> str:
+    """訂單所屬會員編號：優先用訂單 JSON 的 member_id，否則用訂單列上的會員連結。"""
+    value = item.get("member_id") or item.get("memberId") or item.get("__member_id") or ""
+    return str(value).strip()
 
 
 def _parse_stored_value_rows(html: str) -> list:
@@ -264,7 +271,7 @@ def _parse_stored_value_rows(html: str) -> list:
     return rows
 
 
-def _fetch_stored_value_deductions(session, member_id=RESERVE_MEMBER_ID, page_workers=6, max_pages=150) -> dict:
+def _fetch_stored_value_deductions(session, member_id, page_workers=6, max_pages=150) -> dict:
     """彙總儲值金歷程：回傳 {訂單編號: 實際扣儲值金金額}（扣款合計 − 返還合計）。"""
     url = f"https://backend.lemonclean.com.tw/member/{member_id}/stored_value_histories"
     spent, returned = {}, {}
@@ -498,33 +505,38 @@ def generate_reserve_orders_report(trigger="dashboard"):
                 items.extend(month_items)
         for item in items:
             item["__city"] = city
-        return items
 
-    def deduction_worker():
-        # 訂單金額 = 儲值金歷程的扣款；跟各地區抓單同時進行，用第一個可用帳號登入一次。
-        city = next(c for c in CITY_ORDER if c in ACCOUNTS)
-        session = requests.Session()
-        login(session, ACCOUNTS[city]["email"], ACCOUNTS[city]["password"])
-        return _fetch_stored_value_deductions(session)
+        # 訂單金額 = 保留單會員的儲值金歷程扣款。每個地區的保留單會員編號不同，
+        # 從該地區保留單本身取得，並用該地區帳號讀取；失敗只影響金額（退回訂單列總金額）。
+        member_ids = sorted({
+            _purchase_member_id(item) for item in items
+            if not _purchase_is_cancelled(item) and _purchase_is_reserve(item) and _purchase_member_id(item)
+        })
+        city_deductions, city_errors = {}, []
+        if not member_ids:
+            city_errors.append(f"{city}：訂單資料找不到保留單會員編號，訂單金額改用訂單列總金額")
+        for member_id in member_ids:
+            try:
+                for order_no, amount in _fetch_stored_value_deductions(session, member_id).items():
+                    city_deductions[order_no] = city_deductions.get(order_no, 0) + amount
+            except Exception as exc:
+                city_errors.append(f"{city} 會員 {member_id} 儲值金歷程抓取失敗，金額改用訂單列總金額：{exc}")
+        return items, city_deductions, city_errors
 
     cities = [city for city in CITY_ORDER if city in ACCOUNTS]
     records, errors = [], []
     deductions = {}
-    with ThreadPoolExecutor(max_workers=max(1, len(cities)) + 1) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, len(cities))) as pool:
         futures = {pool.submit(worker, city): city for city in cities}
-        deduction_future = pool.submit(deduction_worker) if cities else None
         for future in as_completed(futures):
             city = futures[future]
             try:
-                records.extend(future.result())
+                city_items, city_deductions, city_errors = future.result()
+                records.extend(city_items)
+                deductions.update(city_deductions)
+                errors.extend(city_errors)
             except Exception as exc:
                 errors.append(f"{city} 保留單抓取失敗：{exc}")
-                log(f"⚠️ {errors[-1]}")
-        if deduction_future is not None:
-            try:
-                deductions = deduction_future.result()
-            except Exception as exc:
-                errors.append(f"儲值金歷程抓取失敗，訂單金額改用訂單列總金額：{exc}")
                 log(f"⚠️ {errors[-1]}")
     error_text = " / ".join(errors) if errors else None
 
