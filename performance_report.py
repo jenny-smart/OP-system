@@ -202,7 +202,10 @@ def _extract_purchase_row_info(html: str) -> dict:
     """
     info = {}
     try:
-        soup = BeautifulSoup(str(html or ""), "html.parser")
+        try:
+            soup = BeautifulSoup(str(html or ""), "lxml")  # 比 html.parser 快很多
+        except Exception:
+            soup = BeautifulSoup(str(html or ""), "html.parser")
         rows = soup.find_all("tr")
     except Exception:
         return info
@@ -222,7 +225,18 @@ def _extract_purchase_row_info(html: str) -> dict:
         status_match = re.search(r"付款狀態[：:]\s*(\S+)", row_text)
         amount_match = re.search(r"總金額[：:]\s*(-?[\d,]+)", row_text)
         period_match = re.search(r"(\d{2}:\d{2})\s*[-~～]\s*(\d{2}:\d{2})", cells[2].get_text(" ", strip=True))
+        member_id = ""
+        for link in row.find_all("a", href=re.compile(r"/member/(?:edit/)?\d+")):
+            member_id = re.search(r"/member/(?:edit/)?(\d+)", link.get("href", "")).group(1)
+            break
+        address = ""
+        for line in cells[1].get_text("\n", strip=True).splitlines():
+            if _ADDRESS_LINE.match(line.strip()):
+                address = line.strip()
+                break
         info[order_match.group(0)] = {
+            "__address": address,
+            "__member_id": member_id,
             "__staff": names,
             "__pay_status": status_match.group(1) if status_match else "",
             "__amount": int(amount_match.group(1).replace(",", "")) if amount_match else None,
@@ -231,10 +245,106 @@ def _extract_purchase_row_info(html: str) -> dict:
     return info
 
 
-def _fetch_purchase_items(session, **filters):
-    """依條件讀取所有分頁訂單並以訂單編號去重。"""
+_ADDRESS_LINE = re.compile(
+    r"^(?:台|臺|新北|桃園|台中|臺中|台南|臺南|高雄|基隆|新竹|嘉義|苗栗|彰化|南投|雲林|屏東|宜蘭|花蓮|台東|臺東)"
+    r".{0,3}[市縣].*[區鄉鎮市路街]"
+)
+
+
+def _city_from_address(address) -> str:
+    """依服務地址的縣市判斷地區；判斷不出來回傳空字串（呼叫端改用抓到訂單的帳號地區）。"""
+    text = str(address or "").strip().replace("臺", "台")
+    if text.startswith("新竹"):
+        return "新竹"
+    if text.startswith(("高雄", "台南")):
+        return "高雄"
+    if text.startswith("桃園"):
+        return "桃園"
+    if text.startswith("台中"):
+        return "台中"
+    if text.startswith(("台北", "新北")):
+        return "台北"
+    return ""
+
+
+def _purchase_member_id(item) -> str:
+    """訂單所屬會員編號：優先用訂單 JSON 的 member_id，否則用訂單列上的會員連結。"""
+    value = item.get("member_id") or item.get("memberId") or item.get("__member_id") or ""
+    return str(value).strip()
+
+
+def _parse_stored_value_rows(html: str) -> list:
+    """儲值金歷程表格：預約日期／服務日期／訂單編號／項目／入帳金額／扣款金額／餘額／備註。
+
+    回傳 [(訂單編號, 入帳金額, 扣款金額)]，入帳為正數、扣款為負數（沒有填就是 0）。
+    """
+    rows = []
+    try:
+        soup = BeautifulSoup(str(html or ""), "lxml")
+    except Exception:
+        soup = BeautifulSoup(str(html or ""), "html.parser")
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 6:
+            continue
+        order_match = re.search(r"\b[A-Z]{2}\d{5,}\b", cells[2].get_text(" ", strip=True))
+        if not order_match:
+            continue
+
+        def money(cell):
+            digits = re.sub(r"[^\d\-]", "", cell.get_text(strip=True))
+            return int(digits) if digits not in ("", "-") else 0
+
+        rows.append((order_match.group(0), money(cells[4]), money(cells[5])))
+    return rows
+
+
+def _fetch_stored_value_deductions(session, member_id, page_workers=6, max_pages=150) -> dict:
+    """彙總儲值金歷程：回傳 {訂單編號: 實際扣儲值金金額}（扣款合計 − 返還合計）。"""
+    url = f"https://backend.lemonclean.com.tw/member/{member_id}/stored_value_histories"
+    spent, returned = {}, {}
+    seen_signatures = set()
+
+    def fetch_page(page):
+        response = session.get(url, params={"page": str(page)}, headers=HEADERS, allow_redirects=True)
+        response.raise_for_status()
+        return response.text
+
+    page = 1
+    while page <= max_pages:
+        pages = list(range(page, min(page + page_workers, max_pages + 1)))
+        with ThreadPoolExecutor(max_workers=len(pages)) as pool:
+            texts = list(pool.map(fetch_page, pages))
+        finished = False
+        for text in texts:
+            rows = _parse_stored_value_rows(text)
+            signature = tuple(rows[:3])
+            if not rows or signature in seen_signatures:
+                finished = True  # 空頁，或頁碼不被支援而回到重複的頁面
+                break
+            seen_signatures.add(signature)
+            for order_no, income, deduct in rows:
+                if deduct:
+                    spent[order_no] = spent.get(order_no, 0) + abs(deduct)
+                if income:
+                    returned[order_no] = returned.get(order_no, 0) + income
+        if finished:
+            break
+        page += len(pages)
+    return {no: spent.get(no, 0) - returned.get(no, 0) for no in set(spent) | set(returned)}
+
+
+def _fetch_purchase_items(session, page_workers=1, **filters):
+    """依條件讀取所有分頁訂單並以訂單編號去重。
+
+    page_workers > 1 時一次同時抓多頁（一批 page_workers 頁），再依頁碼順序處理；
+    遇到空頁或不滿 20 筆的頁就停止。預設 1 = 原本逐頁抓取的行為。
+    """
     seen = {}
-    for page in range(1, 81):
+    max_pages = 80
+    wave = max(1, int(page_workers or 1))
+
+    def fetch_page(page):
         params = {
             "keyword": "", "name": "", "phone": "", "orderNo": "",
             "date_s": "", "date_e": "", "clean_date_s": "", "clean_date_e": "",
@@ -247,17 +357,37 @@ def _fetch_purchase_items(session, **filters):
         params.update({k: v for k, v in filters.items() if v not in (None, "")})
         response = session.get(PURCHASE_URL, params=params, headers=HEADERS, allow_redirects=True)
         response.raise_for_status()
-        items = _extract_purchase_list_data(response.text)
+        return response.text
+
+    def handle_page(text):
+        """回傳 True 表示還有下一頁。"""
+        items = _extract_purchase_list_data(text)
         if not items:
-            break
-        row_info = _extract_purchase_row_info(response.text)
+            return False
+        row_info = _extract_purchase_row_info(text)
         for item in items:
             order_no = str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or "").strip()
             if order_no:
                 item.update(row_info.get(order_no, {}))
                 seen[order_no] = item
-        if len(items) < 20:
+        return len(items) >= 20
+
+    page = 1
+    while page <= max_pages:
+        pages = list(range(page, min(page + wave, max_pages + 1)))
+        if len(pages) == 1:
+            texts = [fetch_page(pages[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=len(pages)) as pool:
+                texts = list(pool.map(fetch_page, pages))
+        more = True
+        for text in texts:
+            if not handle_page(text):
+                more = False
+                break
+        if not more:
             break
+        page += len(pages)
     return list(seen.values())
 
 
@@ -329,9 +459,25 @@ def _reserve_order_month_ranges(base: Optional[datetime] = None):
     return ranges
 
 
-def build_reserve_orders_df(records, month_ranges) -> pd.DataFrame:
-    """把保留單逐筆列出：日期、星期、時數（人數 × 每人服務時數）、專員（人數）。"""
+def build_reserve_orders_df(records, month_ranges, deductions=None) -> pd.DataFrame:
+    """把保留單逐筆列出：日期、星期、時數（人數 × 每人服務時數）、專員（人數）。
+
+    deductions：{訂單編號: 實際扣儲值金金額}；有的話訂單金額用它，沒有的訂單退回用訂單列的「總金額」。
+    """
+    deductions = deductions or {}
     rows = []
+    # 各地區帳號看到的訂單會重疊（同一張單會從好幾個帳號抓到），
+    # 所以依訂單編號去重；地區以「服務地址」判斷，不是抓到它的帳號。
+    city_rank = {city: i for i, city in enumerate(CITY_ORDER)}
+    ordered_records = sorted(records, key=lambda r: city_rank.get(r.get("__city"), len(city_rank)))
+    unique_records, seen_orders = [], set()
+    for item in ordered_records:
+        key = str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or "")
+        if key and key in seen_orders:
+            continue
+        seen_orders.add(key)
+        unique_records.append(item)
+    records = unique_records
     for month_name, label, start, end in month_ranges:
         for item in records:
             if _purchase_is_cancelled(item) or not _purchase_is_reserve(item):
@@ -349,11 +495,14 @@ def build_reserve_orders_df(records, month_ranges) -> pd.DataFrame:
             people = _purchase_people(item)
             staff_names = [str(n) for n in (item.get("__staff") or []) if str(n).strip()]
             amount = item.get("__amount")
+            order_no = str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or "")
+            if order_no in deductions:
+                amount = deductions[order_no]
             rows.append({
                 "月份別": month_name,
                 "月份": label,
-                "地區": item.get("__city", ""),
-                "訂單編號": str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or ""),
+                "地區": _city_from_address(item.get("__address") or item.get("address")) or item.get("__city", ""),
+                "訂單編號": order_no,
                 "日期": date_text,
                 "星期": weekday,
                 "服務時段": str(item.get("__period") or ""),
@@ -385,6 +534,7 @@ def generate_reserve_orders_report(trigger="dashboard"):
         def fetch_month(month_range):
             return _fetch_purchase_items(
                 session,
+                page_workers=3,  # 每個月一次同時抓 3 頁
                 clean_date_s=month_range[2],
                 clean_date_e=month_range[3],
             )
@@ -395,22 +545,42 @@ def generate_reserve_orders_report(trigger="dashboard"):
                 items.extend(month_items)
         for item in items:
             item["__city"] = city
-        return items
+
+        # 訂單金額 = 保留單會員的儲值金歷程扣款。每個地區的保留單會員編號不同，
+        # 從該地區保留單本身取得，並用該地區帳號讀取；失敗只影響金額（退回訂單列總金額）。
+        member_ids = sorted({
+            _purchase_member_id(item) for item in items
+            if not _purchase_is_cancelled(item) and _purchase_is_reserve(item) and _purchase_member_id(item)
+        })
+        city_deductions, city_errors = {}, []
+        if not member_ids:
+            city_errors.append(f"{city}：訂單資料找不到保留單會員編號，訂單金額改用訂單列總金額")
+        for member_id in member_ids:
+            try:
+                for order_no, amount in _fetch_stored_value_deductions(session, member_id).items():
+                    city_deductions[order_no] = city_deductions.get(order_no, 0) + amount
+            except Exception as exc:
+                city_errors.append(f"{city} 會員 {member_id} 儲值金歷程抓取失敗，金額改用訂單列總金額：{exc}")
+        return items, city_deductions, city_errors
 
     cities = [city for city in CITY_ORDER if city in ACCOUNTS]
     records, errors = [], []
+    deductions = {}
     with ThreadPoolExecutor(max_workers=max(1, len(cities))) as pool:
         futures = {pool.submit(worker, city): city for city in cities}
         for future in as_completed(futures):
             city = futures[future]
             try:
-                records.extend(future.result())
+                city_items, city_deductions, city_errors = future.result()
+                records.extend(city_items)
+                deductions.update(city_deductions)
+                errors.extend(city_errors)
             except Exception as exc:
                 errors.append(f"{city} 保留單抓取失敗：{exc}")
                 log(f"⚠️ {errors[-1]}")
     error_text = " / ".join(errors) if errors else None
 
-    df = build_reserve_orders_df(records, month_ranges)
+    df = build_reserve_orders_df(records, month_ranges, deductions)
 
     ensure_dirs()
     path = os.path.join(LATEST_DIR, RESERVE_ORDERS_FILE)
