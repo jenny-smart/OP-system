@@ -1079,7 +1079,7 @@ def render_month_performance_report_tab():
 
     updated_at = meta.get("reserve_orders_updated_at")
     st.caption(
-        "當月、次月、次次月、次次次月的保留單明細；時數＝專員人數 × 每人服務時數，專員＝人數。"
+        "當月、次月、次次月、次次次月、付款狀態為已付款的保留單；總人時＝專員人數 × 每人服務時數。"
         + (f"　最後更新：{updated_at}" if updated_at else "")
     )
     if meta.get("reserve_orders_error"):
@@ -1096,22 +1096,89 @@ def render_month_performance_report_tab():
     if not df.empty and {"月份別", "月份"} <= set(df.columns):
         month_labels.update(dict(zip(df["月份別"], df["月份"])))
 
+    new_cols = {"服務時段", "總人時", "專員人數", "專員姓名", "訂單金額"}
+    if not df.empty and not new_cols <= set(df.columns):
+        st.info("保留單資料是舊格式（沒有專員姓名／金額），請按上方「更新保留單」重新產生。")
+        df = pd.DataFrame()
+
+    only_lemon = st.checkbox(
+        "只看專員含「檸檬人」的保留單", value=False, key="reserve_only_lemon",
+    )
+    nonce = st.session_state.get("reserve_cancel_nonce", 0)
+    city_order = ["台北", "台中", "桃園", "新竹", "高雄"]
+
     tabs = st.tabs([f"{name}（{month_labels.get(name, '')}）" if month_labels.get(name) else name for name in month_names])
     for tab, name in zip(tabs, month_names):
         with tab:
             if df.empty or "月份別" not in df.columns:
                 st.info("尚未產生保留單明細，請按「更新保留單」。")
                 continue
-            sub = df[df["月份別"] == name].drop(columns=["月份別", "月份"])
+            sub = df[df["月份別"] == name].drop(columns=["月份別", "月份"]).copy()
+            if only_lemon:
+                sub = sub[sub["專員姓名"].fillna("").astype(str).str.contains("檸檬人", regex=False)]
             if sub.empty:
-                st.info(f"{name}沒有保留單。")
+                st.info(f"{name}沒有符合條件的保留單。")
                 continue
-            hours = pd.to_numeric(sub["時數"], errors="coerce").fillna(0)
-            m1, m2, m3 = st.columns(3)
-            m1.metric("保留單數", f"{len(sub):,}")
-            m2.metric("總時數", f"{hours.sum():,.1f}".rstrip("0").rstrip("."))
-            m3.metric("專員人次", f"{int(pd.to_numeric(sub['專員'], errors='coerce').fillna(0).sum()):,}")
-            st.dataframe(sub, use_container_width=True, hide_index=True, height=360)
+            for col in ("總人時", "專員人數", "訂單金額"):
+                sub[col] = pd.to_numeric(sub[col], errors="coerce").fillna(0)
+
+            # 依地區統計
+            region = (
+                sub.groupby("地區")
+                .agg(保留單數=("訂單編號", "count"), 總人時=("總人時", "sum"),
+                     專員人次=("專員人數", "sum"), 訂單金額=("訂單金額", "sum"))
+                .reset_index()
+            )
+            region["__o"] = region["地區"].map(lambda c: city_order.index(c) if c in city_order else len(city_order))
+            region = region.sort_values("__o").drop(columns="__o")
+            total_row = {"地區": "合計", "保留單數": region["保留單數"].sum(), "總人時": region["總人時"].sum(),
+                         "專員人次": region["專員人次"].sum(), "訂單金額": region["訂單金額"].sum()}
+            region = pd.concat([region, pd.DataFrame([total_row])], ignore_index=True)
+            st.markdown("**依地區統計**")
+            st.dataframe(
+                region, use_container_width=True, hide_index=True,
+                column_config={
+                    "保留單數": st.column_config.NumberColumn(format="%d"),
+                    "總人時": st.column_config.NumberColumn(format="%.1f"),
+                    "專員人次": st.column_config.NumberColumn(format="%d"),
+                    "訂單金額": st.column_config.NumberColumn(format="%d"),
+                },
+            )
+
+            # 明細＋取消勾選
+            st.markdown("**明細**（勾選「取消」後按下方按鈕）")
+            detail = sub[["地區", "訂單編號", "日期", "星期", "服務時段", "總人時", "專員姓名", "訂單金額"]].copy()
+            detail.insert(0, "取消", False)
+            edited = st.data_editor(
+                detail, use_container_width=True, hide_index=True, height=360,
+                disabled=[c for c in detail.columns if c != "取消"],
+                column_config={"取消": st.column_config.CheckboxColumn("取消", default=False)},
+                key=f"reserve_editor_{name}_{int(only_lemon)}_{nonce}",
+            )
+            picked = edited[edited["取消"]]
+            if picked.empty:
+                continue
+            st.warning(f"已勾選 {len(picked)} 張保留單。取消後無法還原；備註已有其他內容的訂單會自動跳過。")
+            confirmed = st.checkbox(
+                f"我確認要取消以上 {len(picked)} 張保留單", key=f"reserve_confirm_{name}_{nonce}",
+            )
+            if st.button(f"取消勾選的 {len(picked)} 張保留單", key=f"reserve_cancel_btn_{name}_{nonce}",
+                         disabled=not confirmed, type="primary"):
+                import reserve_cancel as _reserve_cancel
+                with st.spinner("正在取消保留單…"):
+                    results = _reserve_cancel.cancel_reserve_orders(picked[["地區", "訂單編號"]].to_dict("records"))
+                done = {r["訂單編號"] for r in results if r.get("ok")}
+                if done:
+                    keep = df[~df["訂單編號"].astype(str).isin(done)]
+                    keep.to_csv(os.path.join(LATEST_DIR, "reserve_orders.csv"), index=False, encoding="utf-8-sig")
+                st.session_state["reserve_cancel_nonce"] = nonce + 1
+                st.session_state["reserve_cancel_results"] = pd.DataFrame(results)[["地區", "訂單編號", "ok", "message"]]
+                st.rerun()
+
+    last = st.session_state.get("reserve_cancel_results")
+    if last is not None:
+        st.markdown("**上次取消結果**")
+        st.dataframe(last.rename(columns={"ok": "成功"}), use_container_width=True, hide_index=True)
 
 
 def render_performance_report_page():

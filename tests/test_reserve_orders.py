@@ -30,10 +30,41 @@ def test_build_reserve_orders_lists_date_weekday_hours_and_people():
     assert df["訂單編號"].tolist() == ["A1", "A2"]
     first = df.iloc[0]
     assert (first["月份別"], first["地區"], first["日期"], first["星期"]) == ("當月", "台北", "2026-11-21", "週六")
-    assert first["時數"] == 8 and first["專員"] == 2
+    assert first["總人時"] == 8 and first["專員人數"] == 2 and first["訂單金額"] == 4800
     second = df.iloc[1]
     assert (second["月份別"], second["星期"]) == ("次月", "週六")
-    assert second["時數"] == 9 and second["專員"] == 3
+    assert second["總人時"] == 9 and second["專員人數"] == 3
+
+
+def test_build_reserve_orders_staff_names_amount_and_paid_only():
+    ranges = report._reserve_order_month_ranges(datetime(2026, 11, 20))
+    records = [
+        {"__city": "台北", "order_no": "P1", "date_clean": "2026-11-24", "name": "檸檬保留", "person": 2, "hour": 3,
+         "__staff": ["黃柏維", "李佩蓉"], "__pay_status": "已付款", "__amount": 0, "__period": "09:00-12:00"},
+        {"__city": "台北", "order_no": "P2", "date_clean": "2026-11-25", "name": "檸檬保留", "person": 1, "hour": 3,
+         "__staff": ["王小明"], "__pay_status": "待付款", "__amount": 100, "__period": "09:00-12:00"},
+    ]
+    df = report.build_reserve_orders_df(records, ranges)
+    assert df["訂單編號"].tolist() == ["P1"]
+    row = df.iloc[0]
+    assert row["專員姓名"] == "黃柏維 X 李佩蓉"
+    assert row["服務時段"] == "09:00-12:00" and row["付款狀態"] == "已付款" and row["訂單金額"] == 0
+
+
+def test_extract_purchase_row_info_reads_staff_status_amount_period():
+    html = """
+    <table><tr>
+      <td>LC00219433</td><td>代客預訂：淑慧 檸檬保留</td>
+      <td>2027-02-24 (三)<br>09:00 - 12:00
+        <a href="/schedule/edit?id=1"><span>黃柏維</span>(2)</a> X
+        <a href="/schedule/edit?id=2"><span>李佩蓉</span>(4)</a></td>
+      <td>總金額：0<br>付款狀態：已付款</td><td>已處理</td><td>取消訂單</td>
+    </tr></table>
+    """
+    info = report._extract_purchase_row_info(html)["LC00219433"]
+    assert info["__staff"] == ["黃柏維", "李佩蓉"]
+    assert info["__pay_status"] == "已付款" and info["__amount"] == 0
+    assert info["__period"] == "09:00-12:00"
 
 
 def test_build_reserve_orders_empty():
