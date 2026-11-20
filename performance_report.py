@@ -338,20 +338,42 @@ def generate_reserve_orders_report(trigger="dashboard"):
             item["__city"] = city
         return items
 
-    city_results, errors = _parallel_city_results(worker)
-    records = [item for _, items in city_results for item in items]
+    cities = [city for city in CITY_ORDER if city in ACCOUNTS]
+    records, errors = [], []
+    with ThreadPoolExecutor(max_workers=max(1, len(cities))) as pool:
+        futures = {pool.submit(worker, city): city for city in cities}
+        for future in as_completed(futures):
+            city = futures[future]
+            try:
+                records.extend(future.result())
+            except Exception as exc:
+                errors.append(f"{city} 保留單抓取失敗：{exc}")
+                log(f"⚠️ {errors[-1]}")
+    error_text = " / ".join(errors) if errors else None
+
     df = build_reserve_orders_df(records, month_ranges)
 
     ensure_dirs()
     path = os.path.join(LATEST_DIR, RESERVE_ORDERS_FILE)
     df.to_csv(path, index=False, encoding="utf-8-sig")
     append_output_file_log("保留單明細", path, trigger)
-    _update_latest_meta(
-        reserve_orders_rows=int(len(df)),
-        reserve_orders_updated_at=now_dt().strftime("%Y-%m-%d %H:%M:%S"),
-        reserve_orders_error=" / ".join(errors) if errors else None,
-    )
-    return {"reserve_orders_df": df, "error": " / ".join(errors) if errors else None}
+
+    # 只更新 meta.json 裡保留單相關的欄位，其他欄位原樣保留。
+    meta_path = os.path.join(LATEST_DIR, "meta.json")
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception:
+        meta = {}
+    meta.update({
+        "reserve_orders_rows": int(len(df)),
+        "reserve_orders_updated_at": now_dt().strftime("%Y-%m-%d %H:%M:%S"),
+        "reserve_orders_error": error_text,
+    })
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    return {"reserve_orders_df": df, "error": error_text}
 
 
 def build_order_date_summary(raw_df: pd.DataFrame, month_rows=None) -> pd.DataFrame:
