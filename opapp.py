@@ -1138,21 +1138,31 @@ def render_month_performance_report_tab():
             st.dataframe(
                 region, use_container_width=True, hide_index=True,
                 column_config={
-                    "保留單數": st.column_config.NumberColumn(format="%d"),
-                    "總人時": st.column_config.NumberColumn(format="%.1f"),
-                    "專員人次": st.column_config.NumberColumn(format="%d"),
-                    "訂單金額": st.column_config.NumberColumn(format="%d"),
+                    "地區": st.column_config.TextColumn(width="small"),
+                    "保留單數": st.column_config.NumberColumn(format="%d", width="small"),
+                    "總人時": st.column_config.NumberColumn(format="%.1f", width="small"),
+                    "專員人次": st.column_config.NumberColumn(format="%d", width="small"),
+                    "訂單金額": st.column_config.NumberColumn(format="%d", width="small"),
                 },
             )
 
             # 明細＋取消勾選
             st.markdown("**明細**（勾選「取消」後按下方按鈕）")
-            detail = sub[["地區", "訂單編號", "日期", "星期", "服務時段", "總人時", "專員姓名", "訂單金額"]].copy()
+            # 訂單金額放在專員姓名前面，避免窄螢幕要往右捲才看得到。
+            detail = sub[["地區", "訂單編號", "日期", "星期", "服務時段", "總人時", "訂單金額", "專員姓名"]].copy()
             detail.insert(0, "取消", False)
             edited = st.data_editor(
                 detail, use_container_width=True, hide_index=True, height=360,
                 disabled=[c for c in detail.columns if c != "取消"],
-                column_config={"取消": st.column_config.CheckboxColumn("取消", default=False)},
+                column_config={
+                    "取消": st.column_config.CheckboxColumn("取消", default=False, width="small"),
+                    "地區": st.column_config.TextColumn(width="small"),
+                    "日期": st.column_config.TextColumn(width="small"),
+                    "星期": st.column_config.TextColumn(width="small"),
+                    "服務時段": st.column_config.TextColumn(width="small"),
+                    "總人時": st.column_config.NumberColumn(format="%.1f", width="small"),
+                    "訂單金額": st.column_config.NumberColumn(format="%d", width="small"),
+                },
                 key=f"reserve_editor_{name}_{int(only_lemon)}_{nonce}",
             )
             picked = edited[edited["取消"]]
