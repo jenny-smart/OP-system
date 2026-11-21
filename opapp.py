@@ -1136,6 +1136,14 @@ def render_month_performance_report_tab():
     if view_df.empty:
         st.info("沒有符合條件的保留單，或尚未產生保留單明細，請按「更新保留單」。")
     else:
+        if "金額來源" in view_df.columns:
+            _from_history = int((view_df["金額來源"] == "儲值金扣款").sum())
+            _not_matched = int(len(view_df) - _from_history)
+            st.caption(
+                f"訂單金額來源：儲值金扣款 {_from_history} 張；"
+                f"儲值金歷程找不到、改用訂單列總金額 {_not_matched} 張。"
+                + ("　⚠️ 這些單的金額不是儲值金扣款，請看上方「金額來源診斷」。" if _not_matched else "")
+            )
         st.markdown("**每區每月**（每月的保留單數與訂單金額）")
         st.dataframe(_rv.region_month_matrix(view_df, month_names), use_container_width=True, hide_index=True)
         st.markdown("**每區各階段**（依服務日期分階段，跨月份合計）")
@@ -1156,7 +1164,10 @@ def render_month_performance_report_tab():
             # 明細＋取消勾選
             st.markdown("**明細**（勾選「取消」後按下方按鈕）")
             # 訂單金額放在專員姓名前面，避免窄螢幕要往右捲才看得到。
-            detail = sub[["地區", "訂單編號", "日期", "星期", "服務時段", "總人時", "階段", "訂單金額", "專員姓名"]].copy()
+            detail_cols = ["地區", "訂單編號", "日期", "星期", "服務時段", "總人時", "階段", "訂單金額"]
+            if "金額來源" in sub.columns:
+                detail_cols.append("金額來源")
+            detail = sub[detail_cols + ["專員姓名"]].copy()
             detail.insert(0, "取消", False)
             edited = st.data_editor(
                 detail, use_container_width=True, hide_index=True, height=360,
