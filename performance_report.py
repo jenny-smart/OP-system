@@ -332,10 +332,29 @@ def _parse_stored_value_rows(html: str) -> list:
     回傳 [(訂單編號, 入帳金額, 扣款金額)]，入帳為正數、扣款為負數（沒有填就是 0）。
     """
     rows = []
+    # 歷程頁是 Vue 頁面：表格列由前端畫出，資料在 script 的 storedValueList: [...] JSON 裡。
+    text = str(html or "")
+    marker = text.find("storedValueList:")
+    if marker >= 0:
+        start = text.find("[", marker)
+        try:
+            data, _ = json.JSONDecoder().raw_decode(text[start:])
+        except Exception:
+            data = None
+        if isinstance(data, list):
+            def num(value):
+                digits = re.sub(r"[^\d\-]", "", str(value or ""))
+                return int(digits) if digits not in ("", "-") else 0
+
+            for entry in data:
+                order_no = str(entry.get("orderNo") or "").strip()
+                if re.fullmatch(r"[A-Z]{2}\d{5,}", order_no):
+                    rows.append((order_no, num(entry.get("credit")), num(entry.get("debit"))))
+            return rows
     try:
-        soup = BeautifulSoup(str(html or ""), "lxml")
+        soup = BeautifulSoup(text, "lxml")
     except Exception:
-        soup = BeautifulSoup(str(html or ""), "html.parser")
+        soup = BeautifulSoup(text, "html.parser")
 
     def money(cell):
         digits = re.sub(r"[^\d\-]", "", cell.get_text(strip=True))
