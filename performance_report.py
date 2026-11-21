@@ -527,17 +527,25 @@ def build_reserve_orders_df(records, month_ranges, deductions=None) -> pd.DataFr
     """
     deductions = deductions or {}
     rows = []
-    # 各地區帳號看到的訂單會重疊（同一張單會從好幾個帳號抓到），
-    # 所以依訂單編號去重；地區以「服務地址」判斷，不是抓到它的帳號。
+    # 各地區帳號看到的訂單會重疊（例如新竹單在新竹、高雄後台都查得到），所以依訂單編號去重。
+    # 地區 = 「查得到這張單的後台帳號」；只有同一張單被多個帳號查到時，才用服務地址挑其中一個。
+    # （不能單看服務地址：例如新北地址的單可能屬於桃園後台，取消與金額都得用那個後台的帳號。）
     city_rank = {city: i for i, city in enumerate(CITY_ORDER)}
-    ordered_records = sorted(records, key=lambda r: city_rank.get(r.get("__city"), len(city_rank)))
-    unique_records, seen_orders = [], set()
-    for item in ordered_records:
+    grouped, order_keys = {}, []
+    for item in records:
         key = str(item.get("order_no") or item.get("orderNo") or item.get("purchase_id") or "")
-        if key and key in seen_orders:
-            continue
-        seen_orders.add(key)
-        unique_records.append(item)
+        if key not in grouped:
+            grouped[key] = []
+            order_keys.append(key)
+        grouped[key].append(item)
+    unique_records = []
+    for key in order_keys:
+        group = sorted(grouped[key], key=lambda r: city_rank.get(r.get("__city"), len(city_rank)))
+        address_city = next(
+            (c for c in (_city_from_address(r.get("__address") or r.get("address")) for r in group) if c), ""
+        )
+        chosen = next((r for r in group if r.get("__city") == address_city), group[0])
+        unique_records.append(chosen)
     records = unique_records
     for month_name, label, start, end in month_ranges:
         for item in records:
@@ -562,7 +570,7 @@ def build_reserve_orders_df(records, month_ranges, deductions=None) -> pd.DataFr
             rows.append({
                 "月份別": month_name,
                 "月份": label,
-                "地區": _city_from_address(item.get("__address") or item.get("address")) or item.get("__city", ""),
+                "地區": item.get("__city", ""),
                 "訂單編號": order_no,
                 "日期": date_text,
                 "星期": weekday,
