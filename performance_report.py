@@ -601,11 +601,20 @@ def generate_reserve_orders_report(trigger="dashboard"):
         login(session, account["email"], account["password"])
 
         # 4 個月各自查詢並同時進行（原本是一個長區間逐頁抓，最慢）。
+        # 直接用後台搜尋條件縮小範圍（與手動搜尋一致）：姓名含「保留」、付款狀態＝已付款
+        # （purchase_status=1）、服務日期起日＝明天。不用把每月所有訂單都翻一遍。
+        tomorrow = (now_dt() + timedelta(days=1)).strftime("%Y-%m-%d")
+
         def fetch_month(month_range):
+            month_start = str(month_range[2])
+            if str(month_range[3]) < tomorrow:
+                return []  # 整個月份都在今天以前
             return _fetch_purchase_items(
                 session,
                 page_workers=3,  # 每個月一次同時抓 3 頁
-                clean_date_s=month_range[2],
+                name="保留",
+                purchase_status="1",
+                clean_date_s=max(month_start, tomorrow),
                 clean_date_e=month_range[3],
             )
 
