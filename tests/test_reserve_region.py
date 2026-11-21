@@ -35,3 +35,11 @@ def test_city_falls_back_to_fetching_account_when_address_unknown():
     records = [{"__city": "台中", "order_no": "LC1", "date_clean": "2026-11-24", "name": "檸檬保留", "person": 1, "hour": 2}]
     df = report.build_reserve_orders_df(records, ranges)
     assert df.iloc[0]["地區"] == "台中"
+
+
+def test_order_found_only_in_one_backend_keeps_that_backend_even_if_address_differs():
+    ranges = report._reserve_order_month_ranges(datetime(2026, 11, 20))
+    records = [{"__city": "桃園", "order_no": "LC00217731", "date_clean": "2026-12-04", "name": "檸檬保留",
+                "person": 2, "hour": 3, "__address": "新北市林口區文化三路", "__pay_status": "已付款"}]
+    df = report.build_reserve_orders_df(records, ranges)
+    assert df.iloc[0]["地區"] == "桃園"  # 在桃園後台查得到，取消與金額都要用桃園帳號
