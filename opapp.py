@@ -1076,9 +1076,13 @@ def render_month_performance_report_tab():
             # st.rerun 會清掉畫面上的訊息，所以把警告存起來，頁面上一直顯示到下次更新。
             st.session_state["reserve_update_error"] = result.get("error") or ""
             st.rerun()
-    _reserve_error = st.session_state.get("reserve_update_error")
+    # 警告同時存在 session 與 meta.json：重新開啟頁面、Reboot 之後仍看得到上次更新的訊息。
+    _reserve_error = st.session_state.get("reserve_update_error") or meta.get("reserve_orders_error")
     if _reserve_error:
-        st.warning("上次更新保留單的警告：\n\n" + str(_reserve_error).replace(" / ", "\n\n"))
+        with st.expander("🔎 金額來源診斷／警告（上次更新）", expanded=True):
+            st.markdown("\n\n".join(f"- {line}" for line in str(_reserve_error).split(" / ")))
+    elif meta.get("reserve_orders_updated_at"):
+        st.caption("上次更新沒有警告，但也沒有金額診斷訊息：表示線上程式可能還是舊版，請 Reboot app 後再按一次更新。")
 
     updated_at = meta.get("reserve_orders_updated_at")
     st.caption(
