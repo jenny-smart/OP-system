@@ -499,7 +499,7 @@ RESERVE_ORDER_MONTH_NAMES = ["當月", "次月", "次次月", "次次次月"]
 RESERVE_ORDERS_FILE = "reserve_orders.csv"
 RESERVE_ORDER_COLS = [
     "月份別", "月份", "地區", "訂單編號", "日期", "星期", "服務時段",
-    "總人時", "專員人數", "專員姓名", "訂單金額", "付款狀態",
+    "總人時", "專員人數", "專員姓名", "訂單金額", "付款狀態", "金額來源",
 ]
 _WEEKDAY_NAMES = ["一", "二", "三", "四", "五", "六", "日"]
 
@@ -580,6 +580,7 @@ def build_reserve_orders_df(records, month_ranges, deductions=None) -> pd.DataFr
                 "專員姓名": " X ".join(staff_names),
                 "訂單金額": int(amount) if amount is not None else _purchase_amount(item),
                 "付款狀態": pay_status,
+                "金額來源": "儲值金扣款" if order_no in deductions else "訂單列總金額（儲值金歷程無此單）",
             })
     df = pd.DataFrame(rows, columns=RESERVE_ORDER_COLS)
     if df.empty:
