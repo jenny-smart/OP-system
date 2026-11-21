@@ -428,6 +428,56 @@ def _fetch_stored_value_deductions(session, member_id, page_workers=6, max_pages
     return {no: spent.get(no, 0) - returned.get(no, 0) for no in set(spent) | set(returned)}
 
 
+_HISTORY_SEARCH_PARAMS = ("order_no", "orderNo", "order_number", "keyword", "search", "q", "orderNumber")
+
+
+def _search_stored_value_by_order(session, member_id, order_no, hint=None) -> tuple:
+    """用訂單編號在儲值金歷程搜尋。回傳 (扣款金額或 None, 有效的搜尋參數名)。
+
+    後台搜尋參數名稱不確定，依序嘗試；只接受「回傳的列確實含這張訂單編號」的結果，
+    所以猜錯參數（被忽略而回整頁）不會誤判。hint 為先前成功的參數名，優先使用。
+    """
+    url = f"https://backend.lemonclean.com.tw/member/{member_id}/stored_value_histories"
+    candidates = ([hint] if hint else []) + [p for p in _HISTORY_SEARCH_PARAMS if p != hint]
+    for param in candidates:
+        try:
+            response = session.get(url, params={param: order_no}, headers=HEADERS, allow_redirects=True)
+            response.raise_for_status()
+        except Exception:
+            continue
+        rows = _parse_stored_value_rows(response.text)
+        mine = [r for r in rows if r[0] == order_no]
+        if not mine:
+            continue
+        if any(r[0] != order_no for r in rows):
+            continue  # 參數被忽略，回的是整頁，不是搜尋結果
+        spent = sum(abs(d) for _, _, d in mine if d)
+        back = sum(i for _, i, _ in mine if i)
+        return spent - back, param
+    return None, None
+
+
+def _fill_deductions_by_order_search(session, member_ids, order_nos, workers=8) -> tuple:
+    """對整頁分頁沒涵蓋到的訂單，逐張用訂單編號搜尋歷程。回傳 ({單號: 金額}, 有效參數名)。"""
+    result, used = {}, {"param": None}
+    ids = sorted(member_ids)
+
+    def one(order_no):
+        for member_id in ids:
+            amount, param = _search_stored_value_by_order(session, member_id, order_no, used["param"])
+            if amount is not None:
+                used["param"] = param
+                return order_no, amount
+        return order_no, None
+
+    if order_nos and ids:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for order_no, amount in pool.map(one, sorted(order_nos)):
+                if amount is not None:
+                    result[order_no] = amount
+    return result, used["param"]
+
+
 def _fetch_purchase_items(session, page_workers=1, **filters):
     """依條件讀取所有分頁訂單並以訂單編號去重。
 
@@ -681,9 +731,25 @@ def generate_reserve_orders_report(trigger="dashboard"):
                 )
             except Exception as exc:
                 city_errors.append(f"{city} 會員 {member_id} 儲值金歷程抓取失敗，金額改用訂單列總金額：{exc}")
+        # 整頁分頁沒涵蓋到的保留單，改用訂單編號逐張搜尋歷程（與手動搜尋一樣）
+        all_reserve_nos = {
+            str(i.get("order_no") or i.get("orderNo") or "") for i in items
+            if not _purchase_is_cancelled(i) and _purchase_is_reserve(i)
+        } - {""}
+        missing_nos = all_reserve_nos - set(city_deductions)
+        if missing_nos and member_ids:
+            try:
+                by_search, param = _fill_deductions_by_order_search(session, member_ids, missing_nos)
+                city_deductions.update(by_search)
+                city_errors.append(
+                    f"{city}（診斷）訂單編號搜尋：補到 {len(by_search)}／{len(missing_nos)} 張，"
+                    f"有效搜尋參數：{param or '無（全部沒搜到）'}"
+                )
+            except Exception as exc:
+                city_errors.append(f"{city} 訂單編號搜尋歷程失敗：{exc}")
         return items, city_deductions, city_errors
 
-    cities = [city for city in CITY_ORDER if city in ACCOUNTS]
+    cities =[city for city in CITY_ORDER if city in ACCOUNTS]
     records, errors = [], []
     deductions = {}
     with ThreadPoolExecutor(max_workers=max(1, len(cities))) as pool:
