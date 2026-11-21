@@ -336,20 +336,51 @@ def _parse_stored_value_rows(html: str) -> list:
         soup = BeautifulSoup(str(html or ""), "lxml")
     except Exception:
         soup = BeautifulSoup(str(html or ""), "html.parser")
-    for tr in soup.find_all("tr"):
-        cells = tr.find_all("td")
-        if len(cells) < 6:
-            continue
-        order_match = re.search(r"\b[A-Z]{2}\d{5,}\b", cells[2].get_text(" ", strip=True))
-        if not order_match:
-            continue
 
-        def money(cell):
-            digits = re.sub(r"[^\d\-]", "", cell.get_text(strip=True))
-            return int(digits) if digits not in ("", "-") else 0
+    def money(cell):
+        digits = re.sub(r"[^\d\-]", "", cell.get_text(strip=True))
+        return int(digits) if digits not in ("", "-") else 0
 
-        rows.append((order_match.group(0), money(cells[4]), money(cells[5])))
+    for table in soup.find_all("table"):
+        # 依表頭找欄位位置；找不到就用預設位置（訂單編號第3欄、入帳第5欄、扣款第6欄）
+        idx_order, idx_income, idx_deduct = 2, 4, 5
+        head = table.find("tr")
+        if head is not None:
+            labels = [c.get_text(strip=True) for c in head.find_all(["th", "td"])]
+            for i, label in enumerate(labels):
+                if "訂單編號" in label:
+                    idx_order = i
+                elif "入帳" in label or "返還" in label:
+                    idx_income = i
+                elif "扣款" in label:
+                    idx_deduct = i
+        for tr in table.find_all("tr"):
+            cells = tr.find_all("td")
+            if len(cells) <= max(idx_order, idx_income, idx_deduct):
+                continue
+            order_match = re.search(r"\b[A-Z]{2}\d{5,}\b", cells[idx_order].get_text(" ", strip=True))
+            if not order_match:
+                continue
+            rows.append((order_match.group(0), money(cells[idx_income]), money(cells[idx_deduct])))
     return rows
+
+
+def _describe_history_page(response) -> str:
+    """歷程頁讀不到資料時，留下頁面長相供診斷（狀態、最終網址、表格數、首列文字）。"""
+    text = response.text or ""
+    try:
+        soup = BeautifulSoup(text, "lxml")
+    except Exception:
+        soup = BeautifulSoup(text, "html.parser")
+    title = soup.title.get_text(strip=True) if soup.title else ""
+    first_row = ""
+    tr = soup.find("tr")
+    if tr is not None:
+        first_row = "|".join(c.get_text(strip=True) for c in tr.find_all(["th", "td"]))[:120]
+    return (
+        f"HTTP {getattr(response, 'status_code', '?')}，網址 {getattr(response, 'url', '?')}，長度 {len(text)}，標題「{title[:30]}」，"
+        f"表格 {len(soup.find_all('table'))} 個／{len(soup.find_all('tr'))} 列，首列「{first_row}」"
+    )
 
 
 def _fetch_stored_value_deductions(session, member_id, page_workers=6, max_pages=150, stats=None) -> dict:
@@ -367,6 +398,8 @@ def _fetch_stored_value_deductions(session, member_id, page_workers=6, max_pages
     def fetch_page(page):
         response = session.get(url, params={"page": str(page)}, headers=HEADERS, allow_redirects=True)
         response.raise_for_status()
+        if page == 1:
+            stats["page1"] = _describe_history_page(response)
         return response.text
 
     page = 1
@@ -644,6 +677,7 @@ def generate_reserve_orders_report(trigger="dashboard"):
                 city_errors.append(
                     f"{city}（診斷）會員 {member_id}：歷程讀到 {stats['pages']} 頁／{stats['rows']} 筆，"
                     f"涵蓋 {len(found)} 張訂單，對上保留單 {hit}／{len(reserve_nos)} 張"
+                    + (f"；第1頁：{stats.get('page1', '')}" if not stats["rows"] else "")
                 )
             except Exception as exc:
                 city_errors.append(f"{city} 會員 {member_id} 儲值金歷程抓取失敗，金額改用訂單列總金額：{exc}")
