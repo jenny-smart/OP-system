@@ -1,6 +1,78 @@
 import pandas as pd
+import json
+from datetime import datetime
 
-import performance_report as report
+from tools.scheduled_daily import performance_report as report
+from tools.scheduled_daily import performance_report_runner as runner
+
+
+def test_extended_report_crosses_year_and_preserves_existing_reports(tmp_path, monkeypatch):
+    output = tmp_path / "extended" / "report.json"
+    old_report = tmp_path / "df4.csv"
+    old_report.write_bytes(b"legacy")
+    monkeypatch.setattr(report, "EXTENDED_REPORT_FILE", output)
+    monkeypatch.setattr(report, "LATEST_DIR", str(tmp_path))
+    monkeypatch.setattr(report, "now_dt", lambda: datetime(2026, 11, 26, 10, 30))
+    ranges = report.get_order_service_month_ranges("2026-11-26")
+    raw = pd.DataFrame([
+        {"城市": "台北", "月份": "2027/01", "服務": "居家清潔", "收入類型": "現金收入",
+         "已付款": 100, "待付款": 50},
+        {"城市": "台中", "月份": "2027/01", "服務": "居家清潔", "收入類型": "現金收入",
+         "已付款": 50, "待付款": 0},
+    ])
+    orders = [{"地區": "台北", "付款狀態": "已付款", "月份金額": {"2027/02": 90}}]
+    reserves = [{"__city": "台北", "name": "系統保留單", "date_clean": "2027-02-12",
+                 "order_no": "reserve-1", "total": 500, "person": 2, "hour": 3}]
+    for _ in range(2):
+        report.save_extended_report(raw, orders, reserves, ranges, "2026-11-26", "2026-11-26")
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    assert old_report.read_bytes() == b"legacy"
+    assert saved["summary"][0]["次次月加總"] == 150
+    assert saved["summary"][0]["次次月佔比"] == 0.75
+    assert saved["orders"]["已付款"][0]["2027/02已付款"] == 90
+    assert saved["reserve_details"][0]["保留單時數"] == 6
+    for period, month in (("次次月", "2027/01"), ("次次次月", "2027/02")):
+        rows = saved["history"][period]
+        assert [r["統計月份"] for r in rows] == [month, month]
+        assert len({r["id"] for r in rows}) == 2
+
+    report.save_extended_report(None, None, [], ranges, None, None)
+    reserve_only = json.loads(output.read_text(encoding="utf-8"))
+    assert reserve_only["reserve_details"] == []
+    assert reserve_only["orders"] == saved["orders"]
+    assert reserve_only["history"] == saved["history"]
+
+    report.save_extended_report(raw, None, None, ranges, None, None)
+    current_only = json.loads(output.read_text(encoding="utf-8"))
+    assert current_only["orders"] == saved["orders"]
+    assert current_only["reserve_details"] == []
+    assert current_only["history"]["次次月"][1:] == saved["history"]["次次月"]
+
+
+def test_reserve_amount_uses_net_history_debit_including_zero():
+    from types import SimpleNamespace
+    from tools.scheduled_daily.reserve_deductions import resolve_deductions
+
+    pages = {
+        "1": '[{"orderNo":"LC100000","debit":-600},{"orderNo":"LC200000","debit":-300}]',
+        "2": '[{"orderNo":"LC100000","credit":100},{"orderNo":"LC200000","credit":300}]',
+    }
+
+    def get(url, *, params, **kwargs):
+        return SimpleNamespace(
+            text="storedValueList: " + pages.get(params["page"], "[]"),
+            raise_for_status=lambda: None,
+        )
+
+    items = [
+        {"member_id": "42", "order_no": "LC100000"},
+        {"member_id": "42", "order_no": "LC200000"},
+        {"member_id": "42", "order_no": "LC300000"},
+    ]
+    amounts = resolve_deductions(SimpleNamespace(get=get), items, "https://example.com/purchase", {})
+    assert amounts == {"LC100000": 500, "LC200000": 0}
+    assert report._reserve_amount({"total": 999, "__actual_reserve_deduction": amounts["LC200000"]}) == 0
+    assert report._reserve_amount({"total": 999}) == 999
 
 
 def test_configurable_month_ranges_cross_year():
@@ -12,141 +84,148 @@ def test_configurable_month_ranges_cross_year():
     ]
 
 
-def test_order_date_summary_groups_by_city_and_totals():
-    # raw_df 跟 build_month_performance_summary 共用同一種形狀（來自財務彙總表的
-    # parse_html() 結果，沒有服務日期——那張表是依服務分類彙總，不是逐筆訂單）。
-    raw_df = pd.DataFrame([
-        {"城市": "台北", "收入類型": "現金收入", "服務": "居家清潔", "已付款": 2000, "待付款": 1000},
-        {"城市": "台中", "收入類型": "現金收入", "服務": "居家清潔", "已付款": 0, "待付款": 500},
-    ])
-    out = report.build_order_date_summary(raw_df)
+def test_order_date_summary_groups_region_and_splits_payment():
+    records = [
+        {"__city": "台北", "created_at": "2026-08-17 10:00:00", "total": "1,000", "purchase_status": "0"},
+        {"__city": "台北", "created_at": "2026-08-18 10:00:00", "total": "2,000", "purchase_status": "1"},
+        {"__city": "台中", "created_at": "2026-08-18 11:00:00", "total": 500, "purchase_status": "0"},
+        {"__city": "台北", "created_at": "2026-08-18 12:00:00", "total": 999, "purchase_status": "1", "cancel_at": "2026-08-18"},
+    ]
+    out = report.build_order_date_summary(records)
     assert out.iloc[0].to_dict() == {
-        "地區": "台北", "待付款": 1000, "已付款": 2000, "待付款＋已付款": 3000,
-        "儲值金待付款": 0, "儲值金已付款": 0, "儲值金待付款＋已付款": 0,
+        "地區": "台北", "未付款": 1000,
+        "已付款": 2000, "未付款＋已付款": 3000,
     }
-    total_row = out[out["地區"] == "加總"].iloc[0]
-    assert total_row.to_dict() == {
-        "地區": "加總", "待付款": 1500, "已付款": 2000, "待付款＋已付款": 3500,
-        "儲值金待付款": 0, "儲值金已付款": 0, "儲值金待付款＋已付款": 0,
+    assert out.iloc[1]["地區"] == "台中"
+    assert out.iloc[-1].to_dict() == {
+        "地區": "加總", "未付款": 1500,
+        "已付款": 2000, "未付款＋已付款": 3500,
     }
-    # 每個地區都要有自己的一列，不能像舊版那樣另外多一列「儲值金」。
-    assert out["地區"].tolist() == [*report.CITY_ORDER, "加總"]
-    # 沒有傳 order_rows，就不會有月份欄位，不會出錯。
-    assert list(out.columns) == [
-        "地區", "待付款", "已付款", "待付款＋已付款",
-        "儲值金待付款", "儲值金已付款", "儲值金待付款＋已付款",
+
+
+def test_order_date_summaries_split_service_month_and_add_stored_weekend_price():
+    ranges = report.get_order_service_month_ranges("2026-12-20", month_count=4)
+    assert ranges[-1][0] == "2027/03"
+    records = [
+        {"__city": "台北", "date_clean": "2026-12-28", "total": 1000, "purchase_status": "0"},
+        {"__city": "台北", "date_clean": "2027-01-03", "total": 2000, "purchase_status": "1",
+         "stored_value_weekend_price": 200},
+        {"__city": "台中", "service": "儲值金", "buy": 5, "total": 3000, "purchase_status": "0"},
+    ]
+    tables = report.build_order_date_summaries(records, ranges)
+    unpaid = tables["待付款"].set_index("地區")
+    paid = tables["已付款"].set_index("地區")
+    combined = tables["待付款＋已付款"].set_index("地區")
+
+    assert unpaid.loc["台北", "2026/12待付款"] == 1000
+    assert unpaid.loc["台中", "儲值金待付款"] == 3000
+    assert unpaid.loc["台中", "待付款"] == 0
+    assert paid.loc["台北", "2027/01已付款"] == 2200
+    assert combined.loc["台北", "待付款＋已付款"] == 3200
+    assert not report._purchase_is_stored_value_topup(
+        {"buy": 1, "service": "居家清潔", "date_clean": "2026-12-28"}
+    )
+
+
+def test_paid_summary_matches_backend_service_and_stored_value_totals():
+    ranges = report.get_order_service_month_ranges("2026-08-24", month_count=4)
+    records = [
+        {"__city": "台北", "date_clean": "2026-08-10", "total": 31600, "purchase_status": "1"},
+        {"__city": "台北", "date_clean": "2026-08-20", "total": 4800,
+         "payway": "儲值金", "purchase_status": "1"},
+        {"__city": "台北", "date_clean": "2026-09-10", "total": 10800, "purchase_status": "1"},
+        {"__city": "台北", "date_clean": "2026-09-20", "total": 21600,
+         "payway": "儲值金", "purchase_status": "1"},
+        {"__city": "台北", "service": "儲值金", "buy": 5, "total": 50000, "purchase_status": "1"},
+    ]
+    paid = report.build_order_date_summaries(records, ranges)["已付款"].set_index("地區")
+
+    assert paid.loc["台北", "已付款"] == 68800
+    assert paid.loc["台北", "2026/08已付款"] == 36400
+    assert paid.loc["台北", "2026/09已付款"] == 32400
+    assert paid.loc["台北", "儲值金已付款"] == 50000
+
+
+def test_report_rows_use_exact_backend_paid_amounts_without_json_tail_digits():
+    ranges = report.get_order_service_month_ranges("2026-08-24", month_count=4)
+    records = [{
+        "地區": "台北",
+        "付款狀態": "已付款",
+        "總金額": 42400 + 26400,
+        "月份金額": {"2026/08": 31600 + 4800, "2026/09": 10800 + 21600},
+        "儲值金金額": 50000,
+    }]
+    paid = report.build_order_date_summaries_from_report_rows(
+        records, ranges,
+    )["已付款"].set_index("地區")
+
+    assert paid.loc["台北", "已付款"] == 68800
+    assert paid.loc["台北", "2026/08已付款"] == 36400
+    assert paid.loc["台北", "2026/09已付款"] == 32400
+    assert paid.loc["台北", "儲值金已付款"] == 50000
+
+
+def test_report_amount_split_keeps_stored_value_service_in_paid_total():
+    rows = [
+        {"收入類型": "現金收入", "服務": "居家清潔", "已付款": 42400},
+        {"收入類型": "儲值金", "服務": "居家清潔", "已付款": 26400},
+        {"收入類型": "現金收入", "服務": "儲值金", "已付款": 50000},
     ]
 
-
-def test_order_date_summary_excludes_appliances_water_wash_and_storage():
-    raw_df = pd.DataFrame([
-        # 桃園清潔現金與清潔儲值金都應保留。
-        {"城市": "桃園", "收入類型": "現金收入", "服務": "居家清潔", "已付款": 4800, "待付款": 5700},
-        {"城市": "桃園", "收入類型": "儲值金", "服務": "居家清潔", "已付款": 7200, "待付款": 0},
-        # 家電、水洗與收納不得出現在上方三張付款彙總表。
-        {"城市": "桃園", "收入類型": "現金收入", "服務": "洗衣機清潔", "已付款": 4000, "待付款": 7500},
-        {"城市": "桃園", "收入類型": "現金收入", "服務": "水洗", "已付款": 3000, "待付款": 2000},
-        {"城市": "桃園", "收入類型": "現金收入", "服務": "收納", "已付款": 1000, "待付款": 900},
-    ])
-
-    out = report.build_order_date_summary(raw_df)
-    taoyuan = out[out["地區"] == "桃園"].iloc[0]
-
-    assert taoyuan["待付款"] == 5700
-    assert taoyuan["已付款"] == 12000
-    assert taoyuan["待付款＋已付款"] == 17700
+    assert report._payment_amount_from_report_rows(rows, 1) == (68800, 50000)
 
 
-def test_order_date_summary_splits_service_date_into_dynamic_month_columns():
-    # 財務彙總表（raw_df）只給總額；服務日期來自逐筆訂單資料（order_rows，見
-    # generate_order_date_report() 如何用 _fetch_purchase_items() 組出這份清單），
-    # 台北訂單的服務日期橫跨 8 月跟 9 月，待付款/已付款
-    # 底下應該動態拆成兩組月份欄位，按時間排序，但地區/加總的總額仍然以 raw_df 為準。
-    raw_df = pd.DataFrame([
-        {"城市": "台北", "收入類型": "現金收入", "服務": "居家清潔", "已付款": 3000, "待付款": 1500},
-    ])
-    order_rows = [
-        {"城市": "台北", "日期": "2026-08-20", "已付款": 3000, "待付款": 0, "是否儲值金": False},
-        {"城市": "台北", "日期": "2026-09-05", "已付款": 0, "待付款": 1500, "是否儲值金": False},
+def test_parse_html_adds_weekend_surcharge_only_for_stored_value_table():
+    html = """
+    <table><tr><th>儲值金</th><th>已付款金額</th><th>待付款金額</th><th>週末加價</th></tr>
+    <tr><td>居家清潔</td><td>1,000</td><td>0</td><td>200</td></tr></table>
+    <table><tr><th>現金收入</th><th>已付款金額</th><th>待付款金額</th><th>週末加價</th></tr>
+    <tr><td>居家清潔</td><td>2,000</td><td>0</td><td>300</td></tr></table>
+    """
+    rows = report.parse_html(html)
+    assert rows[0]["已付款"] == 1200
+    assert rows[1]["已付款"] == 2000
+    scheduled_rows = runner.parse_html(html)
+    assert scheduled_rows[0]["已付款"] == 1200
+    assert scheduled_rows[1]["已付款"] == 2000
+    assert report.parse_html(html, payment_status=0)[0]["待付款"] == 200
+    assert runner.parse_html(html, payment_status=0)[0]["待付款"] == 200
+
+
+def test_reserve_hours_and_net_performance():
+    month_ranges = [
+        ("2026/08", "2026-08-01", "2026-08-31"),
+        ("2026/09", "2026-09-01", "2026-09-30"),
     ]
-    out = report.build_order_date_summary(raw_df, order_rows=order_rows)
-    assert list(out.columns) == [
-        "地區", "待付款", "已付款", "待付款＋已付款",
-        "2026/08待付款", "2026/08已付款", "2026/09待付款", "2026/09已付款",
-        "儲值金待付款", "儲值金已付款", "儲值金待付款＋已付款",
+    reserve_records = [
+        {
+            "__city": "台北", "order_no": "LC1", "date_clean": "2026-08-20",
+            "name": "檸檬保留", "person": 2, "hour": 4, "total": 4800,
+        },
+        {
+            "__city": "台中", "order_no": "LC2", "date_clean": "2026-08-21",
+            "notice": "大掃除檸檬保留單 reserve_1", "person": 2,
+            "period_s": "09:00", "period_e": "12:00", "total": 3600,
+        },
     ]
-    taipei_row = out[out["地區"] == "台北"].iloc[0]
-    assert taipei_row["待付款"] == 1500
-    assert taipei_row["已付款"] == 3000
-    assert taipei_row["2026/08待付款"] == 0
-    assert taipei_row["2026/08已付款"] == 3000
-    assert taipei_row["2026/09待付款"] == 1500
-    assert taipei_row["2026/09已付款"] == 0
+    reserve_df = report.build_reserve_summary(reserve_records, month_ranges)
+    taipei = reserve_df[reserve_df["地區"] == "台北"].iloc[0]
+    taichung = reserve_df[reserve_df["地區"] == "台中"].iloc[0]
+    assert taipei["2026/08保留單時數"] == 8
+    assert taipei["2026/08保留單業績"] == 4800
+    assert taichung["2026/08保留單時數"] == 6
 
-
-def test_order_date_summary_splits_out_stored_value_by_city():
-    raw_df = pd.DataFrame([
-        # 一般清潔訂單，即使是用儲值金付款，服務分類仍然是「清潔」，要留在待付款/已付款。
-        {"城市": "台北", "收入類型": "現金收入", "服務": "居家清潔", "已付款": 2800, "待付款": 0},
-        {"城市": "台中", "收入類型": "現金收入", "服務": "居家清潔", "已付款": 0, "待付款": 500},
-        # 儲值金儲值單：raw_df 裡的「服務」欄位已經是 parse_html() 正規化過的值
-        # （原始表頭「VIP」會被 normalize_service 轉成「儲值金」），收入類型是「現金收入」
-        # ——跟「目前總表」判斷儲值金的邏輯完全相同。同一個地區（台北）同時有清潔訂單
-        # 跟儲值金訂單，確認兩者不會互相汙染。
-        {"城市": "台北", "收入類型": "現金收入", "服務": "儲值金", "已付款": 0, "待付款": 50000},
-        {"城市": "桃園", "收入類型": "現金收入", "服務": "儲值金", "已付款": 30000, "待付款": 0},
-    ])
-    out = report.build_order_date_summary(raw_df)
-
-    taipei_row = out[out["地區"] == "台北"].iloc[0]
-    assert taipei_row["待付款"] == 0
-    assert taipei_row["已付款"] == 2800
-    assert taipei_row["待付款＋已付款"] == 2800
-    assert taipei_row["儲值金待付款"] == 50000
-    assert taipei_row["儲值金已付款"] == 0
-    assert taipei_row["儲值金待付款＋已付款"] == 50000
-
-    taoyuan_row = out[out["地區"] == "桃園"].iloc[0]
-    assert taoyuan_row["待付款"] == 0
-    assert taoyuan_row["已付款"] == 0
-    assert taoyuan_row["儲值金待付款"] == 0
-    assert taoyuan_row["儲值金已付款"] == 30000
-    assert taoyuan_row["儲值金待付款＋已付款"] == 30000
-
-    total_row = out[out["地區"] == "加總"].iloc[0]
-    assert total_row["待付款"] == 500
-    assert total_row["已付款"] == 2800
-    assert total_row["儲值金待付款"] == 50000
-    assert total_row["儲值金已付款"] == 30000
-    assert total_row["儲值金待付款＋已付款"] == 80000
-
-
-def test_purchase_is_stored_value_topup_detects_order_title():
-    # 儲值金儲值單的「訂購資訊」欄位文字（例如「儲值金-台北(儲值金50,000贈購物金
-    # 2,500)」）在 purchaseList JSON 的某個欄位裡也會出現同樣的文字，整筆記錄用
-    # json 字串搜尋比對，跟 _purchase_is_reserve() 判斷保留單的作法一致。
-    topup_item = {"order_no": "LC1", "name": "儲值金-台北(儲值金50,000贈購物金2,500)"}
-    cleaning_item = {"order_no": "LC2", "name": "代客預訂：Jenny 居家清潔"}
-    assert report._purchase_is_stored_value_topup(topup_item) is True
-    assert report._purchase_is_stored_value_topup(cleaning_item) is False
-
-
-def test_month_performance_minus_reserve_equals_net():
-    month_ranges = [("2026/08", "2026-08-01", "2026-08-31")]
     raw_df = pd.DataFrame([
         {"城市": "台北", "月份": "2026/08", "收入類型": "現金收入", "服務": "居家清潔", "已付款": 8000, "待付款": 2000},
         {"城市": "台中", "月份": "2026/08", "收入類型": "現金收入", "服務": "居家清潔", "已付款": 8000, "待付款": 0},
     ])
-    reserve_records = [
-        {"__city": "台北", "order_no": "LC1", "date_clean": "2026-08-20", "name": "檸檬保留", "person": 2, "hour": 4, "total": 4800},
-        {"__city": "台中", "order_no": "LC2", "date_clean": "2026-08-21", "notice": "大掃除檸檬保留單", "person": 2, "period_s": "09:00", "period_e": "12:00", "total": 3600},
-    ]
-    performance_df = report.build_month_performance_summary(raw_df, month_ranges)
-    reserve_df = report.build_reserve_summary(reserve_records, month_ranges)
     net_df = report.build_net_performance_summary(raw_df, reserve_df, month_ranges)
-
-    assert reserve_df[reserve_df["地區"] == "台北"].iloc[0]["2026/08保留單時數"] == 8
-    assert reserve_df[reserve_df["地區"] == "台中"].iloc[0]["2026/08保留單時數"] == 6
+    performance_df = report.build_month_performance_summary(raw_df, month_ranges)
+    taipei_net = net_df[net_df["地區"] == "台北"].iloc[0]
+    taichung_net = net_df[net_df["地區"] == "台中"].iloc[0]
+    assert taipei_net["2026/08業績－保留單業績"] == 5200
+    assert taichung_net["2026/08業績－保留單業績"] == 4400
+    assert performance_df[performance_df["地區"] == "加總"].iloc[0]["2026/08業績"] == 18000
 
     for city in [*report.CITY_ORDER, "加總"]:
         gross = performance_df[performance_df["地區"] == city].iloc[0]["2026/08業績"]
