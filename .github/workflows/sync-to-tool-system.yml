@@ -1,0 +1,71 @@
+name: Sync performance report to tool-system
+
+# 2026-11-26：業績報表以 op-system 為主。main 上這些檔案有變更時，自動複製到 tool-system 的同一路徑並 push 到 tool-system main。
+# 需要 repository secret TOOL_SYSTEM_SYNC_TOKEN：對 jenny-smart/tool-system 有 Contents 讀寫權限的 fine-grained PAT。
+# 只同步程式碼，不同步 dashboard_data（兩邊各自跑排程產資料）。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - tools/performance_report_ui/**
+      - tools/scheduled_daily/performance_report.py
+      - tools/scheduled_daily/performance_report_runner.py
+      - tools/scheduled_daily/reserve_deductions.py
+      - tests/test_performance_report_extra_tables.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-to-tool-system
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout op-system
+        uses: actions/checkout@v5
+        with:
+          path: op
+
+      - name: Checkout tool-system
+        uses: actions/checkout@v5
+        with:
+          repository: jenny-smart/tool-system
+          ref: main
+          token: ${{ secrets.TOOL_SYSTEM_SYNC_TOKEN }}
+          path: tool
+
+      - name: Copy files
+        run: |
+          set -e
+          mkdir -p tool/tools/performance_report_ui tool/tools/scheduled_daily tool/tests
+          rsync -a --delete --exclude '__pycache__' op/tools/performance_report_ui/ tool/tools/performance_report_ui/
+          for f in performance_report.py performance_report_runner.py reserve_deductions.py; do
+            cp "op/tools/scheduled_daily/$f" "tool/tools/scheduled_daily/$f"
+          done
+          cp op/tests/test_performance_report_extra_tables.py tool/tests/test_performance_report_extra_tables.py
+
+      - name: Verify in tool-system
+        working-directory: tool
+        run: |
+          python -m pip install -q -r requirements.txt pytest
+          python -m py_compile toolapp.py tools/performance_report_ui/report_page.py tools/scheduled_daily/performance_report.py
+          python -m pytest -q tests/test_performance_report_extra_tables.py
+
+      - name: Commit and push to tool-system
+        working-directory: tool
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A tools/performance_report_ui tools/scheduled_daily tests/test_performance_report_extra_tables.py
+          if git diff --cached --quiet; then
+            echo "tool-system 已是最新"
+            exit 0
+          fi
+          git commit -m "Sync performance report from op-system ${GITHUB_SHA::7}"
+          git pull --rebase origin main
+          git push origin HEAD:main

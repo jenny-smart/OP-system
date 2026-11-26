@@ -2,8 +2,11 @@ name: Daily Performance Report
 
 run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || github.workflow }}
 
+# 2026-11-26：改跑 tool-system 同一套業績報表（tools/scheduled_daily/performance_report.py），
+# 產出的 dashboard_data 直接 commit 回本 repo，op-system.streamlit.app 讀這份。
+
 permissions:
-  contents: read
+  contents: write
 
 on:
   workflow_dispatch:
@@ -13,16 +16,16 @@ on:
         required: false
         type: string
         default: ''
-      check_only:
-        description: Verify private History access without generating a report
-        type: boolean
-        default: false
   # 備援 cron：排程已併到 tool-system 主控表「排程設定」的 op_performance_report（台北 00:20／08:10／18:10，
   # 由 Router 派送）。本 repo 設 repository variable EXTERNAL_SCHEDULER_ENABLED=true 後，這三個 cron 會略過。
   schedule:
     - cron: '7 0 * * *'    # 台北 08:07
     - cron: '7 10 * * *'   # 台北 18:07
     - cron: '15 16 * * *'  # 台北 00:15
+
+concurrency:
+  group: op-performance-report
+  cancel-in-progress: false
 
 jobs:
   run-performance-report:
@@ -32,9 +35,9 @@ jobs:
 
     env:
       TZ: Asia/Taipei
-      OP_HISTORY_BACKEND: google_sheets
-      OP_HISTORY_SPREADSHEET_ID: ${{ secrets.OP_HISTORY_SPREADSHEET_ID }}
-      OP_HISTORY_GOOGLE_CREDENTIALS_JSON: ${{ secrets.OP_HISTORY_GOOGLE_CREDENTIALS_JSON || secrets.GOOGLE_SERVICE_ACCOUNT }}
+      PYTHONPATH: ${{ github.workspace }}
+      PERFORMANCE_REPORT_STRICT_ACCOUNTS: "true"
+      PERFORMANCE_REPORT_EMAIL_REQUIRED: "false"
       TAIPEI_EMAIL: ${{ secrets.TAIPEI_EMAIL }}
       TAIPEI_PASSWORD: ${{ secrets.TAIPEI_PASSWORD }}
       TAICHUNG_EMAIL: ${{ secrets.TAICHUNG_EMAIL }}
@@ -49,55 +52,31 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
-      - name: Debug trigger
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "schedule=${{ github.event.schedule }}"
-          echo "UTC:"
-          date -u
-          echo "Taipei:"
-          TZ=Asia/Taipei date
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Verify private History
-        run: |
-          python - <<'PY'
-          from op_history_store import verify_history
-
-          try:
-              verify_history()
-          except Exception as exc:
-              raise SystemExit(str(exc) if isinstance(exc, RuntimeError) else "OP private History check failed.") from None
-          print("Verified private History access and all five periods.")
-          PY
-
-      - name: Ensure performance report folder exists
-        if: ${{ !inputs.check_only }}
-        run: |
-          python - <<'PY'
-          from paths import PATH_REPORT
-
-          PATH_REPORT.mkdir(parents=True, exist_ok=True)
-          print("OK:", PATH_REPORT)
-          PY
-
       - name: Run performance report
-        if: ${{ !inputs.check_only }}
+        # 跟 app「更新全部報表」同一支（含次次月、次次次月、保留單）；第二個參數 false＝不寄信（tool-system 排程會寄）。
+        run: python -u tools/scheduled_daily/performance_report.py schedule false
+
+      - name: Commit dashboard data
+        if: always()
         run: |
-          if ! python performance_report.py schedule false > /dev/null 2>&1; then
-            echo "::error::OP report failed before recording a successful update."
-            exit 1
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f dashboard_data/latest dashboard_data/tool_report_extended 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No report changes"
+          else
+            git commit -m "Update performance report data"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push
           fi
-          echo "OP report completed."
