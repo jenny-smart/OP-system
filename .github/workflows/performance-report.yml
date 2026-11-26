@@ -3,10 +3,11 @@ name: Daily Performance Report
 run-name: ${{ inputs.scheduled_slot && format('cloud-{0}', inputs.scheduled_slot) || github.workflow }}
 
 # 2026-11-26：改跑 tool-system 同一套業績報表（tools/scheduled_daily/performance_report.py），
-# 產出的 dashboard_data 直接 commit 回本 repo，op-system.streamlit.app 讀這份。
+# 產出的 dashboard_data 用 op_data_sync.py 推到 op-system 與 tool-system（需 secret TOOL_SYSTEM_SYNC_TOKEN），
+# 兩邊業績報表數字一致；tool-system 的業績報表排程（performance_report）可以停用。
 
 permissions:
-  contents: write
+  contents: read
 
 on:
   workflow_dispatch:
@@ -48,6 +49,10 @@ jobs:
       HSINCHU_PASSWORD: ${{ secrets.HSINCHU_PASSWORD }}
       KAOHSIUNG_EMAIL: ${{ secrets.KAOHSIUNG_EMAIL }}
       KAOHSIUNG_PASSWORD: ${{ secrets.KAOHSIUNG_PASSWORD }}
+      NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+      NOTIFY_PASSWORD: ${{ secrets.NOTIFY_PASSWORD }}
+      NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+      TOOL_SYSTEM_SYNC_TOKEN: ${{ secrets.TOOL_SYSTEM_SYNC_TOKEN }}
 
     steps:
       - name: Checkout repository
@@ -64,19 +69,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run performance report
-        # 跟 app「更新全部報表」同一支（含次次月、次次次月、保留單）；第二個參數 false＝不寄信（tool-system 排程會寄）。
-        run: python -u tools/scheduled_daily/performance_report.py schedule false
+        # 跟 app「更新全部報表」同一支（含次次月、次次次月、保留單）。
+        # 2026-11-26：業績報表排程改由 op-system 負責，第二個參數 true＝寄信（沒設寄信 secrets 會自動略過寄信）。
+        run: python -u tools/scheduled_daily/performance_report.py schedule true
 
-      - name: Commit dashboard data
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f dashboard_data/latest dashboard_data/tool_report_extended 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No report changes"
-          else
-            git commit -m "Update performance report data"
-            git pull --rebase origin "${GITHUB_REF_NAME}"
-            git push
-          fi
+      - name: Sync data to op-system and tool-system
+        # 2026-11-26：資料同時推到 op-system 與 tool-system（op_data_sync.py），兩邊業績報表數字一致。
+        run: python op_data_sync.py jenny-smart/op-system jenny-smart/tool-system
