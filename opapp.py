@@ -6,6 +6,8 @@
 - 畫面：tools/performance_report_ui/report_page.py；計算：tools/scheduled_daily/performance_report.py。
 - 之後由 op-system 改，push 到 main 後 GitHub Actions（sync-to-tool-system.yml）自動同步到 tool-system。
 - 目前總表、訂購日期付款彙總、保留單業績是雙重表頭（上方月份、下方副標題）。
+2026-11-26 版本 2026-11-26-data-sync-v1：
+- 手動更新完，dashboard_data 自動推到 GitHub 的 op-system 與 tool-system（op_data_sync.py，需 secrets TOOL_SYSTEM_SYNC_TOKEN）。
 """
 import json
 import os
@@ -17,7 +19,7 @@ import streamlit as st
 
 from tools.performance_report_ui import report_page
 
-OPAPP_VERSION = "2026-11-26-tool-system-report-v1"
+OPAPP_VERSION = "2026-11-26-data-sync-v1"
 BASE_DIR = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Jenny 業績報表", page_icon="🍋", layout="wide")
@@ -65,7 +67,20 @@ def run_script(script_path: str, args=None) -> str:
             f"執行失敗：{script_path}\nexit={completed.returncode}\n"
             f"STDOUT:\n{completed.stdout[-3000:]}\nSTDERR:\n{completed.stderr[-3000:]}"
         )
+    _sync_after_update()
     return f"{script_path} 執行完成"
+
+
+def _sync_after_update() -> None:
+    """手動更新完，把 dashboard_data 推到 GitHub 的 op-system 與 tool-system（兩邊數字一致）。"""
+    import op_data_sync
+
+    try:
+        token = st.secrets.get("TOOL_SYSTEM_SYNC_TOKEN")
+    except Exception:
+        token = None
+    result = op_data_sync.push_dashboard_data(token=token, message="Sync performance report data (op-system 手動更新)")
+    st.session_state["op_data_sync_result"] = result
 
 
 def add_log(message: str, level: str = "info") -> None:
@@ -77,5 +92,13 @@ def add_log(message: str, level: str = "info") -> None:
 import importlib  # noqa: E402
 
 report_page = importlib.reload(report_page)
+
+_sync_result = st.session_state.pop("op_data_sync_result", None)
+if _sync_result:
+    _failed = [f"{k}：{v}" for k, v in _sync_result.items() if str(v).startswith("失敗") or k == "_"]
+    if _failed:
+        st.warning("資料同步到 GitHub 未完成：" + "；".join(_failed))
+    else:
+        st.success("已同步資料到 op-system 與 tool-system：" + "；".join(f"{k.split('/')[-1]} {v}" for k, v in _sync_result.items()))
 report_page.render_report(run_script=run_script, add_log=add_log)
 st.caption(f"版本 {OPAPP_VERSION}")
