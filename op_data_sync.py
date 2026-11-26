@@ -8,7 +8,11 @@
 token：TOOL_SYSTEM_SYNC_TOKEN（fine-grained PAT，op-system 與 tool-system 都要有 Contents 讀寫）。
 """
 import base64
+import csv
+import io
+import json
 import os
+import re
 from pathlib import Path
 
 import requests
@@ -19,6 +23,74 @@ TARGET_REPOS = ("jenny-smart/op-system", "jenny-smart/tool-system")
 API = "https://api.github.com"
 
 
+_STAFF_FIELDS = {"專員姓名", "staff_name", "staff_names"}
+_NAME_PARTS = re.compile(r"([、，,；;/／|\s]+)")
+
+
+def _mask_staff(value):
+    """Hide all middle characters; a two-character name keeps only its first."""
+    if isinstance(value, list):
+        return [_mask_staff(item) for item in value]
+    if value is None:
+        return value
+    parts = _NAME_PARTS.split(str(value))
+    for i in range(0, len(parts), 2):
+        name = parts[i]
+        if len(name) >= 3:
+            parts[i] = name[0] + "X" + name[-1]
+        elif len(name) == 2:
+            parts[i] = name[0] + "X"
+        elif name:
+            parts[i] = "X"
+    return "".join(parts)
+
+
+def _is_staff_field(key: str) -> bool:
+    return key.lstrip("\ufeff").strip().casefold() in _STAFF_FIELDS
+
+
+def _mask_json(value):
+    if isinstance(value, list):
+        return [_mask_json(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _mask_staff(item) if _is_staff_field(key) else _mask_json(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _public_payload(path: str, content: bytes) -> bytes:
+    """Sanitize only the copy sent to GitHub; never mutate the source files."""
+    suffix = Path(path).suffix.lower()
+    if suffix not in {".csv", ".json"}:
+        return content
+    encoding = "utf-8-sig" if content.startswith(b"\xef\xbb\xbf") else "utf-8"
+    source = content.decode(encoding)
+    if suffix == ".json":
+        data = json.loads(source)
+        masked = _mask_json(data)
+        return content if data == masked else json.dumps(masked, ensure_ascii=False).encode(encoding)
+    reader = csv.reader(io.StringIO(source, newline=""), strict=True)
+    header = next(reader, [])
+    cols = [i for i, key in enumerate(header) if _is_staff_field(key)]
+    if not cols:
+        if Path(path).name == "reserve_orders.csv" and header:
+            raise ValueError("reserve_orders.csv: missing staff-name column")
+        return content
+    sink = io.StringIO(newline="")
+    writer = csv.writer(sink)
+    writer.writerow(header)
+    for row in reader:
+        if row and len(row) != len(header):
+            raise ValueError(f"{path}: inconsistent CSV width")
+        for i in cols:
+            if row:
+                row[i] = _mask_staff(row[i])
+        writer.writerow(row)
+    return sink.getvalue().encode(encoding)
+
+
 def _files(base_dir: Path):
     for rel in SYNC_DIRS:
         folder = base_dir / rel
@@ -26,7 +98,8 @@ def _files(base_dir: Path):
             continue
         for path in sorted(folder.rglob("*")):
             if path.is_file() and "__pycache__" not in path.parts and not path.name.endswith(".lock"):
-                yield path.relative_to(base_dir).as_posix(), path.read_bytes()
+                name = path.relative_to(base_dir).as_posix()
+                yield name, _public_payload(name, path.read_bytes())
 
 
 def _push_repo(session, repo: str, files, message: str, branch: str = "main") -> str:
@@ -85,7 +158,6 @@ def push_dashboard_data(token: str | None = None, message: str = "Sync performan
 
 
 if __name__ == "__main__":
-    import json
     import sys
 
     repos = sys.argv[1:] or TARGET_REPOS
