@@ -5,7 +5,7 @@
    要改業績報表請改 op-system；直接改 tool-system 這份，下次同步時會被蓋掉。
 
 2026-11-26：從 tool-system toolapp.py 拆出來；目前總表、訂購日期付款彙總、保留單業績改成雙重表頭（上方月份、下方副標題）。
-2026-11-26：本月/次月/次次月/次次次月一律顯示成年月；月度追蹤新日期在上；訂購日期付款彙總固定三張表。
+2026-11-26：上方加總數字縮小完整顯示；本月/次月/次次月/次次次月一律顯示成年月；月度追蹤新日期在上；訂購日期付款彙總固定三張表。
 """
 from __future__ import annotations
 
@@ -39,6 +39,14 @@ REPORT_CSS = """
   .report-table td.text { text-align:left; }
   .report-table tr.total-row td { background:#f8fafc; font-weight:900; }
   .report-table tr:hover td { background:#f1f5f9; }
+  /* 上方加總數字縮小、不截斷，完整顯示（2026-11-26） */
+  [data-testid="stMetricValue"], [data-testid="stMetricValue"] > div {
+    font-size:1.35rem !important; line-height:1.3 !important;
+    overflow:visible !important; text-overflow:clip !important; white-space:nowrap !important;
+  }
+  [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p {
+    font-size:0.85rem !important; overflow:visible !important; text-overflow:clip !important;
+  }
 </style>
 """
 
