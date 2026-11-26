@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import op_history_store as private_history
+import table_headers
 
 from performance_report import (
     generate_sales_report,
@@ -185,6 +186,7 @@ def render_sales_page():
             daily_df = result.get("daily_df", pd.DataFrame())
         email_html = result.get("email_html", "")
         updated_at = now_taipei().strftime("%Y-%m-%d %H:%M:%S")
+        report_base = now_taipei()
         error_msg = result.get("error")
     else:
         payload = load_sales_latest_payload()
@@ -194,6 +196,7 @@ def render_sales_page():
         email_html = payload.get("email_html", "")
         raw_ts = meta.get("updated_at", "") if isinstance(meta, dict) else ""
         updated_at = raw_ts if raw_ts else "尚未產生資料"
+        report_base = raw_ts or now_taipei()
         error_msg = meta.get("error") if isinstance(meta, dict) else None
 
         if payload.get("df4_error"):
@@ -243,8 +246,12 @@ def render_sales_page():
         else:
             int4 = set(REGION4_INT_COLS)
             pct4 = set(REGION4_RATIO_COLS)
+            # 雙重表頭：上方月份（本月→2026/11…，依報表產生日計算），下方加總／佔比／家電加總。
             st.markdown(
-                render_html_table(df4, right_cols=int4 | pct4, pct_cols=pct4, int_cols=int4),
+                table_headers.render_html_table(
+                    df4, labels=table_headers.month_labels(report_base),
+                    pct_cols=pct4, int_cols=int4,
+                ),
                 unsafe_allow_html=True
             )
 

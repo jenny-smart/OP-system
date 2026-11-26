@@ -46,7 +46,7 @@ st.set_page_config(
     layout="wide",
 )
 
-OPAPP_VERSION = "2026-08-19-three-report-tabs-v1"
+OPAPP_VERSION = "2026-11-26-double-header-v1"  # 2026-11-26：三個分頁的月份表格改成雙重表頭（上方月份、下方副標題）
 
 TZ_TAIPEI = timezone(timedelta(hours=8))
 
@@ -1014,18 +1014,10 @@ def _show_order_date_summary_tables(filename: str, empty_message: str):
     paid_cols = ["地區"] + [c for c in df.columns if c not in combined_cols and "已付款" in c]
 
     st.markdown('<div class="section-title">待付款</div>', unsafe_allow_html=True)
-    unpaid_df = df[unpaid_cols]
-    st.dataframe(
-        _format_report_df(unpaid_df), use_container_width=True, hide_index=True, height=280,
-        column_config=_report_column_config(unpaid_df),
-    )
+    _order_date_report_ui._show(df[unpaid_cols])
 
     st.markdown('<div class="section-title">已付款</div>', unsafe_allow_html=True)
-    paid_df = df[paid_cols]
-    st.dataframe(
-        _format_report_df(paid_df), use_container_width=True, hide_index=True, height=280,
-        column_config=_report_column_config(paid_df),
-    )
+    _order_date_report_ui._show(df[paid_cols])
 
     _order_date_report_ui.show_combined_table(
         df, _format_report_df, _report_column_config
@@ -1152,8 +1144,13 @@ def render_month_performance_report_tab():
                 f"儲值金歷程找不到、改用訂單列總金額 {_not_matched} 張。"
                 + ("　⚠️ 這些單的金額不是儲值金扣款，請看上方「金額來源診斷」。" if _not_matched else "")
             )
-        st.markdown("**每區每月**（每月的保留單數與訂單金額）")
-        st.dataframe(_rv.region_month_matrix(view_df, month_names), use_container_width=True, hide_index=True)
+        st.markdown("**每區每月**（每月的保留時數與保留單金額）")
+        # 雙重表頭：上方月份 2026/11…，下方保留時數／保留單金額。
+        import table_headers as _th
+        st.markdown(
+            _th.render_html_table(_rv.region_month_matrix(view_df, month_names), labels=month_labels),
+            unsafe_allow_html=True,
+        )
         st.markdown("**每區各階段**（依服務日期分階段，跨月份合計）")
         st.dataframe(_rv.region_stage_matrix(view_df), use_container_width=True, hide_index=True)
 

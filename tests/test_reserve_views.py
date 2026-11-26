@@ -37,8 +37,9 @@ def test_region_summary_splits_amount_by_stage_with_total_row():
 def test_region_month_matrix_per_region_per_month():
     matrix = rv.region_month_matrix(sample_df(), ["當月", "次月", "次次月"])
     taipei = matrix[matrix["地區"] == "台北"].iloc[0]
-    assert taipei["當月金額"] == 100 and taipei["次月金額"] == 4275 and taipei["次次月單數"] == 0
-    assert matrix.iloc[-1]["次次月金額"] == 5400
+    assert taipei["當月保留單金額"] == 100 and taipei["次月保留單金額"] == 4275 and taipei["次次月保留時數"] == 0
+    assert taipei["次月保留時數"] == 6
+    assert matrix.iloc[-1]["次次月保留單金額"] == 5400 and matrix.iloc[-1]["次次月保留時數"] == 8
 
 
 def test_region_stage_matrix_and_empty():

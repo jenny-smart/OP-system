@@ -4,14 +4,17 @@ import pandas as pd
 import streamlit as st
 
 import order_date_service_report as service_report
+import table_headers
 
 
 def generate_service_report(order_start, order_end, trigger="dashboard"):
     return service_report.generate_service_payment_report(order_start, order_end, trigger=trigger)
 
 
-def _show(df, format_df, column_config, height=280):
-    st.dataframe(format_df(df), use_container_width=True, hide_index=True, height=height, column_config=column_config(df))
+def _show(df, format_df=None, column_config=None, height=None):
+    # 雙重表頭（跟 tool-system 一樣）：上方月份 2026/11…，下方待付款／已付款／待付款＋已付款。
+    # format_df、column_config 保留參數只為了相容舊呼叫，HTML 表格自己處理千分位。
+    st.markdown(table_headers.render_html_table(df, max_height=height), unsafe_allow_html=True)
 
 
 def show_combined_table(df, format_df, column_config):

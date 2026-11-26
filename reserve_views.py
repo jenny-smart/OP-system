@@ -64,7 +64,7 @@ def region_summary(sub: pd.DataFrame) -> pd.DataFrame:
 
 
 def region_month_matrix(df: pd.DataFrame, month_names) -> pd.DataFrame:
-    """每一列是地區，每個月份兩欄：保留單數、訂單金額；最後一列合計。"""
+    """每一列是地區，每個月份兩欄：保留時數（總人時）、保留單金額；最後一列合計。"""
     if df.empty:
         return pd.DataFrame()
     regions = _sort_regions(pd.DataFrame({"地區": df["地區"].dropna().unique()}))["地區"].tolist()
@@ -74,8 +74,8 @@ def region_month_matrix(df: pd.DataFrame, month_names) -> pd.DataFrame:
         row = {"地區": region}
         for month in month_names:
             part = scoped[scoped["月份別"] == month]
-            row[f"{month}單數"] = int(len(part))
-            row[f"{month}金額"] = part["訂單金額"].sum()
+            row[f"{month}保留時數"] = part["總人時"].sum() if "總人時" in part.columns else 0
+            row[f"{month}保留單金額"] = part["訂單金額"].sum()
         rows.append(row)
     return pd.DataFrame(rows)
 
