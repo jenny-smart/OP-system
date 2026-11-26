@@ -42,6 +42,35 @@ REPORT_CSS = """
 """
 
 
+def _order_col_kind(col) -> str | None:
+    text = str(col)
+    if text.endswith("待付款＋已付款"):
+        return "待付款＋已付款"
+    if text.endswith("已付款"):
+        return "已付款"
+    if text.endswith("待付款"):
+        return "待付款"
+    return None
+
+
+def split_order_tables(order_tables: dict) -> dict:
+    """訂購日期付款彙總固定三張表：待付款、已付款、待付款＋已付款。
+
+    2026-11-26：舊資料（例如 op-system 舊版的 order_date_summary.csv）三種欄位混在同一張，
+    這裡把每張表裡不屬於它的欄位拆到對應的表，避免全部擠在「待付款」表。
+    """
+    result = {name: pd.DataFrame() for name in ("待付款", "已付款", "待付款＋已付款")}
+    for name, table in order_tables.items():
+        if table is None or table.empty:
+            continue
+        key_cols = [c for c in table.columns if _order_col_kind(c) is None]
+        for kind in result:
+            cols = [c for c in table.columns if _order_col_kind(c) == kind]
+            if cols and (result[kind].empty or kind == name):
+                result[kind] = table[key_cols + cols].copy()
+    return result
+
+
 def _report_month_labels(base=None) -> dict:
     """本月/次月/次次月/次次次月 → 2026/11、2026/12…（依報表產生日計算，預設今天）。"""
     if isinstance(base, str):
@@ -375,6 +404,7 @@ def render_report(run_script, add_log=None, on_back=None, standalone_link: str |
     )
     if use_saved_four_month_orders:
         order_tables = {name: pd.DataFrame(rows) for name, rows in extended["orders"].items()}
+    order_tables = split_order_tables(order_tables)
 
     report_tabs = st.tabs(["📍 目前總表", "🧾 訂購日期付款彙總", "📅 保留單明細", "📊 月份業績統整"])
 
