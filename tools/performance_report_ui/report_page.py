@@ -54,7 +54,7 @@ def _order_col_kind(col) -> str | None:
     return None
 
 
-def split_order_tables(order_tables: dict) -> dict:
+def split_order_tables(order_tables: dict, months=None) -> dict:
     """訂購日期付款彙總固定三張表：待付款、已付款、待付款＋已付款。
 
     2026-11-26：舊資料（例如 op-system 舊版的 order_date_summary.csv）三種欄位混在同一張，
@@ -64,6 +64,10 @@ def split_order_tables(order_tables: dict) -> dict:
     for name, table in order_tables.items():
         if table is None or table.empty:
             continue
+        if months:
+            # 只留顯示中的四個月（舊資料可能多一個月，例如 2027/03）。
+            table = table[[c for c in table.columns
+                           if not re.match(r"\d{4}/\d{2}", str(c)) or str(c)[:7] in months]]
         key_cols = [c for c in table.columns if _order_col_kind(c) is None]
         for kind in result:
             cols = [c for c in table.columns if _order_col_kind(c) == kind]
@@ -422,7 +426,7 @@ def render_report(run_script, add_log=None, on_back=None, standalone_link: str |
     )
     if use_saved_four_month_orders:
         order_tables = {name: pd.DataFrame(rows) for name, rows in extended["orders"].items()}
-    order_tables = split_order_tables(order_tables)
+    order_tables = split_order_tables(order_tables, months=month_names)
 
     report_tabs = st.tabs(["📍 目前總表", "🧾 訂購日期付款彙總", "📅 保留單明細", "📊 月份業績統整"])
 
