@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import op_history_store as private_history
 
 from performance_report import (
     generate_sales_report,
@@ -54,6 +55,12 @@ def load_sales_latest_payload():
         ("daily_df", "daily_df.csv"),
     ]:
         fp = ld / fname
+        if key == "daily_df" and private_history.enabled():
+            try:
+                payload[key] = private_history.read(fname)
+            except RuntimeError as exc:
+                payload[f"{key}_error"] = str(exc)
+            continue
         if fp.exists():
             try:
                 payload[key] = pd.read_csv(fp, encoding="utf-8-sig")
@@ -169,7 +176,13 @@ def render_sales_page():
 
     if result is not None:
         df4 = result.get("df4", pd.DataFrame())
-        daily_df = result.get("daily_df", pd.DataFrame())
+        if private_history.enabled():
+            history = load_sales_latest_payload()
+            daily_df = history["daily_df"]
+            if history.get("daily_df_error"):
+                st.warning(history["daily_df_error"])
+        else:
+            daily_df = result.get("daily_df", pd.DataFrame())
         email_html = result.get("email_html", "")
         updated_at = now_taipei().strftime("%Y-%m-%d %H:%M:%S")
         error_msg = result.get("error")
@@ -258,7 +271,7 @@ def render_sales_page():
             unsafe_allow_html=True
         )
     else:
-        if "id" in daily_df.columns:
+        if "id" in daily_df.columns and not private_history.enabled():
             del_ids = st.multiselect(
                 "勾選要刪除的每日業績總覽紀錄",
                 options=daily_df["id"].astype(str).tolist(),

@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+.streamlit/secrets.toml
+OP-*-recovery.csv
+OP-history-*.zip

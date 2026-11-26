@@ -10,6 +10,9 @@ from datetime import datetime, timedelta, timezone
 # 不可以在這裡再呼叫 persist_dashboard_payload()，否則同一次更新會寫入兩次。
 import performance_report as _performance_report
 import order_date_report_ui as _order_date_report_ui
+import op_history_store as private_history
+
+os.environ.setdefault("OP_HISTORY_BACKEND", private_history.BACKEND)
 
 LATEST_DIR = _performance_report.LATEST_DIR
 DAILY_HISTORY_DIR = _performance_report.DAILY_HISTORY_DIR
@@ -442,6 +445,8 @@ st.markdown(
 
 # ── Navigation dropdown ───────────────────────────────────────────────────────
 def _read_csv_safe(path: str) -> pd.DataFrame:
+    if private_history.enabled() and os.path.basename(path) in private_history.FILES:
+        return private_history.read(os.path.basename(path))
     if not os.path.exists(path):
         return pd.DataFrame()
     try:
@@ -521,6 +526,8 @@ def _report_column_config(df: pd.DataFrame) -> dict:
 
 
 def _delete_rows_from_csv(path: str, selected_ids) -> bool:
+    if private_history.enabled() and os.path.basename(path) in private_history.FILES:
+        return False
     if not selected_ids or not os.path.exists(path):
         return False
 
@@ -555,7 +562,8 @@ def _show_deletable_csv_section(
         st.info(empty_msg)
         return
 
-    if "id" in df.columns and os.path.exists(path):
+    managed_history = private_history.enabled() and os.path.basename(path) in private_history.FILES
+    if "id" in df.columns and os.path.exists(path) and not managed_history:
         options = df["id"].astype(str).tolist()
         selected = st.multiselect(
             "勾選要刪除的紀錄",

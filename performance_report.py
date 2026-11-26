@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 
 from accounts import ACCOUNTS
 from paths import PATH_REPORT
+import op_history_store as private_history
 
 
 LOGIN_URL = "https://backend.lemonclean.com.tw/login"
@@ -1568,7 +1569,14 @@ def _build_period_overview_df(
 
     latest_path = os.path.join(LATEST_DIR, latest_filename)
     now_obj = run_dt or now_dt()
-    row_id = f"{now_obj.strftime('%Y%m%d%H%M%S')}_{period_label}"
+    sheet_history = private_history.enabled()
+    if sheet_history:
+        # Independent writers must not generate the same key in the same second.
+        from uuid import uuid4
+
+        row_id = f"{now_obj:%Y%m%d%H%M%S}_{period_label}-{uuid4().hex}"
+    else:
+        row_id = f"{now_obj:%Y%m%d%H%M%S}_{period_label}"
     date_text = now_obj.strftime("%Y/%m/%d %H:%M:%S")
 
     offset = REPORT_MONTH_NAMES.index(period_label) if period_label in REPORT_MONTH_NAMES else 0
@@ -1584,7 +1592,7 @@ def _build_period_overview_df(
         except Exception:
             return 0
 
-    if os.path.exists(latest_path):
+    if not sheet_history and os.path.exists(latest_path):
         try:
             old_df = pd.read_csv(latest_path, encoding="utf-8-sig")
         except Exception:
@@ -1959,6 +1967,16 @@ def persist_dashboard_payload(
     log(f"next_month_daily_df rows = {len(next_month_daily_df)}")
     log(f"month_end_df rows = {len(month_end_df)}")
 
+    if private_history.enabled():
+        frames = {
+            "daily_df.csv": daily_df,
+            "next_month_daily_df.csv": next_month_daily_df,
+            **{EXTRA_PERIOD_FILES[key]: frame for key, frame in (extra_period_dfs or {}).items()},
+        }
+        if set(frames) != set(private_history.FILES) or any(len(frame) != 1 for frame in frames.values()):
+            raise RuntimeError("OP 更新未產生完整五期，未追加歷史")
+        private_history.append(frames)
+
     df4.to_csv(latest_df4, index=False, encoding="utf-8-sig")
     append_output_file_log("業績報表", latest_df4, trigger)
 
@@ -1972,16 +1990,17 @@ def persist_dashboard_payload(
             report_df.to_csv(report_path, index=False, encoding="utf-8-sig")
             append_output_file_log("業績報表", report_path, trigger)
 
-    daily_df.to_csv(latest_daily, index=False, encoding="utf-8-sig")
-    append_output_file_log("業績報表", latest_daily, trigger)
+    if not private_history.enabled():
+        daily_df.to_csv(latest_daily, index=False, encoding="utf-8-sig")
+        append_output_file_log("業績報表", latest_daily, trigger)
 
-    next_month_daily_df.to_csv(latest_next_daily, index=False, encoding="utf-8-sig")
-    append_output_file_log("次月統計報表", latest_next_daily, trigger)
+        next_month_daily_df.to_csv(latest_next_daily, index=False, encoding="utf-8-sig")
+        append_output_file_log("次月統計報表", latest_next_daily, trigger)
 
-    for period_name, period_df in (extra_period_dfs or {}).items():
-        extra_path = os.path.join(LATEST_DIR, EXTRA_PERIOD_FILES[period_name])
-        period_df.to_csv(extra_path, index=False, encoding="utf-8-sig")
-        append_output_file_log(f"{period_name}統計報表", extra_path, trigger)
+        for period_name, period_df in (extra_period_dfs or {}).items():
+            extra_path = os.path.join(LATEST_DIR, EXTRA_PERIOD_FILES[period_name])
+            period_df.to_csv(extra_path, index=False, encoding="utf-8-sig")
+            append_output_file_log(f"{period_name}統計報表", extra_path, trigger)
 
     if month_end_df is not None and not month_end_df.empty:
         month_end_df.to_csv(latest_month_end, index=False, encoding="utf-8-sig")
@@ -2047,16 +2066,17 @@ def persist_dashboard_payload(
             report_df.to_csv(report_path, index=False, encoding="utf-8-sig")
             append_output_file_log("業績報表", report_path, trigger)
 
-    daily_df.to_csv(snap_daily, index=False, encoding="utf-8-sig")
-    append_output_file_log("業績報表", snap_daily, trigger)
+    if not private_history.enabled():
+        daily_df.to_csv(snap_daily, index=False, encoding="utf-8-sig")
+        append_output_file_log("業績報表", snap_daily, trigger)
 
-    next_month_daily_df.to_csv(snap_next_daily, index=False, encoding="utf-8-sig")
-    append_output_file_log("次月統計報表", snap_next_daily, trigger)
+        next_month_daily_df.to_csv(snap_next_daily, index=False, encoding="utf-8-sig")
+        append_output_file_log("次月統計報表", snap_next_daily, trigger)
 
-    for period_name, period_df in (extra_period_dfs or {}).items():
-        extra_snap = f"{snapshot_prefix}_{EXTRA_PERIOD_FILES[period_name]}"
-        period_df.to_csv(extra_snap, index=False, encoding="utf-8-sig")
-        append_output_file_log(f"{period_name}統計報表", extra_snap, trigger)
+        for period_name, period_df in (extra_period_dfs or {}).items():
+            extra_snap = f"{snapshot_prefix}_{EXTRA_PERIOD_FILES[period_name]}"
+            period_df.to_csv(extra_snap, index=False, encoding="utf-8-sig")
+            append_output_file_log(f"{period_name}統計報表", extra_snap, trigger)
 
     if month_end_df is not None and not month_end_df.empty:
         month_end_df.to_csv(snap_month_end, index=False, encoding="utf-8-sig")
@@ -2460,7 +2480,7 @@ def main():
     if len(cleaned_args) >= 2:
         send_email = cleaned_args[1].lower() in ("1", "true", "yes", "y")
 
-    generate_sales_report(
+    result = generate_sales_report(
         send_email=send_email,
         persist_dashboard=True,
         trigger=trigger,
@@ -2469,6 +2489,8 @@ def main():
         order_start_date=order_start_date,
         order_end_date=order_end_date,
     )
+    if private_history.enabled() and (result.get("error") or result.get("daily_df", pd.DataFrame()).empty):
+        raise SystemExit("OP 未追加業績歷史")
 
 
 if __name__ == "__main__":
