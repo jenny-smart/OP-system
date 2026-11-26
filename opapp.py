@@ -72,5 +72,10 @@ def add_log(message: str, level: str = "info") -> None:
     print(json.dumps({"level": level, "message": message}, ensure_ascii=False), flush=True)
 
 
+# 2026-11-26：Streamlit 不會自動重新載入子模組，部署新版後可能還在跑舊的 report_page（曾因此出現 KeyError）。
+# 每次執行都重新載入，確保畫面跟 repo 一致。
+import importlib  # noqa: E402
+
+report_page = importlib.reload(report_page)
 report_page.render_report(run_script=run_script, add_log=add_log)
 st.caption(f"版本 {OPAPP_VERSION}")
