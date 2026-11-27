@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-27 14:31:16",
+  "updated_at": "2026-11-27 15:04:31",
   "df4_rows": 6,
   "daily_rows": 760,
   "next_month_daily_rows": 760,
@@ -13,5 +13,7 @@
   "order_start_date": "2026-11-27",
   "order_end_date": "2026-11-27",
   "error": null,
-  "trigger": "dashboard"
+  "trigger": "dashboard",
+  "order_date_updated_at": "2026-11-27 15:04:31",
+  "order_date_error": null
 }
