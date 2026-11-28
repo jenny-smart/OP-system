@@ -1208,8 +1208,41 @@ def _build_period_overview_df(
     out = out.sort_values(["_sort_dt", "id"], ascending=[False, False]).drop(columns=["_sort_dt"])
     out = out.reset_index(drop=True)
 
-    log(f"✅ {period_label}統計報表完成，筆數 = {len(out)}")
+    # 2026-11-28 Jenny：排程改由 op-system 跑這支後，行事曆只剩筆數；
+    # 比照 performance_report_runner.py（2026-11-24）改印各區業績金額與合計。
+    log(f"✅ {period_label}（{stat_month}）業績（截至 {now_dt().strftime('%m/%d %H:%M')}）：" + "／".join(
+        f"{city} {_money(new_row[city + '業績'])}" for city in ("台北", "台中", "桃園", "新竹", "高雄"))
+        + f"；合計 {_money(new_row['全區合計'])}")
     return out[cols]
+
+
+def _money(value) -> str:
+    try:
+        return f"{int(round(float(value))):,}"
+    except (TypeError, ValueError):
+        return str(value or 0)
+
+
+def _log_order_date_summary(table, payment_label, start_date, end_date):
+    """把訂購日期付款彙總（各區服務金額＋儲值金）印到 log，排程記錄行事曆才看得到。"""
+    try:
+        if table is None or table.empty:
+            return
+        period = start_date if start_date == end_date else f"{start_date}～{end_date}"
+        rows = {str(r["地區"]): r for _, r in table.iterrows()}
+        stored_col = f"儲值金{payment_label}"
+
+        def amount(city, col):
+            row = rows.get(city)
+            return 0 if row is None or col not in row else row[col]
+
+        parts = "／".join(f"{city} {_money(amount(city, payment_label))}" for city in CITY_ORDER)
+        log(
+            f"✅ 當日訂購（{period}，截至 {now_dt().strftime('%H:%M')}）{payment_label}：{parts}；合計 {_money(amount('加總', payment_label))}"
+            f"（另儲值金 {_money(amount('加總', stored_col))}）"
+        )
+    except Exception as exc:  # 只是 log，不能影響報表本身
+        log(f"⚠️ 當日訂購{payment_label}彙總輸出失敗：{exc}")
 
 
 def build_extended_performance(raw_df, month_ranges):
@@ -2107,6 +2140,9 @@ def generate_sales_report(
         order_date_df = order_summaries["待付款"]
         order_date_paid_df = order_summaries["已付款"]
         order_date_combined_df = order_summaries["待付款＋已付款"]
+        # 2026-11-28 Jenny：行事曆要看「當日訂購日期付款彙總」
+        _log_order_date_summary(order_date_paid_df, "已付款", order_start_date, order_end_date)
+        _log_order_date_summary(order_date_df, "待付款", order_start_date, order_end_date)
         month_performance_df = build_month_performance_summary(report_raw_df, report_month_ranges)
         reserve_df = build_reserve_summary(reserve_records, report_month_ranges)
         net_performance_df = build_net_performance_summary(report_raw_df, reserve_df, report_month_ranges)
