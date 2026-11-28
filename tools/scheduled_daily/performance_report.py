@@ -1208,8 +1208,19 @@ def _build_period_overview_df(
     out = out.sort_values(["_sort_dt", "id"], ascending=[False, False]).drop(columns=["_sort_dt"])
     out = out.reset_index(drop=True)
 
-    log(f"✅ {period_label}統計報表完成，筆數 = {len(out)}")
+    # 2026-11-28 Jenny：排程改由 op-system 跑這支後，行事曆只剩筆數；
+    # 比照 performance_report_runner.py（2026-11-24）改印各區業績金額與合計。
+    log(f"✅ {period_label}（{stat_month}）業績：" + "／".join(
+        f"{city} {_money(new_row[city + '業績'])}" for city in ("台北", "台中", "桃園", "新竹", "高雄"))
+        + f"；合計 {_money(new_row['全區合計'])}")
     return out[cols]
+
+
+def _money(value) -> str:
+    try:
+        return f"{int(round(float(value))):,}"
+    except (TypeError, ValueError):
+        return str(value or 0)
 
 
 def build_extended_performance(raw_df, month_ranges):
