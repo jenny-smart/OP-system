@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-11-28 02:28:28",
+  "updated_at": "2026-11-28 08:03:50",
   "df4_rows": 6,
-  "daily_rows": 762,
-  "next_month_daily_rows": 762,
+  "daily_rows": 763,
+  "next_month_daily_rows": 763,
   "month_end_rows": 0,
   "order_date_rows": 6,
   "month_performance_rows": 6,
@@ -10,10 +10,8 @@
   "net_performance_rows": 6,
   "report_start_month": "2026/11",
   "report_end_month": "2026/12",
-  "order_start_date": "2026-11-27",
+  "order_start_date": "2026-11-28",
   "order_end_date": "2026-11-28",
   "error": null,
-  "trigger": "dashboard",
-  "order_date_updated_at": "2026-11-28 02:28:28",
-  "order_date_error": null
+  "trigger": "schedule"
 }
